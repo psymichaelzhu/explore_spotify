@@ -90,7 +90,7 @@ features.printSchema()
 
 # %% K-means
 # try different numbers of clusters to find optimal k
-def find_optimal_kmeans(features, k_values=range(2, 6)):
+def find_optimal_kmeans(features, k_values=range(2, 13)):
     """
     Find optimal k for KMeans clustering using silhouette scores
     
@@ -237,7 +237,6 @@ merged_results.groupby('prediction') \
                .count() \
                .show()
 cluster_results=merged_results.filter(F.col("prediction") != 3)
-cluster_results.show()
 cluster_results.groupby('prediction') \
                .count() \
                .show()
@@ -280,9 +279,9 @@ def plot_cluster_distribution(cluster_data,artist_name=None,sample_size=0.1,seed
     
     return cluster_counts
 
-def plot_cluster_evolution(cluster_data, artist_name=None,sample_size=0.1,seed=None):
+def plot_cluster_evolution(cluster_data, artist_name=None, sample_size=0.1, seed=None):
     """Plot evolution of clusters over time"""
-    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name,sample_size,seed)
+    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
     
     # Calculate proportion of each cluster per year
     yearly_proportions = cluster_data.pivot_table(
@@ -293,16 +292,22 @@ def plot_cluster_evolution(cluster_data, artist_name=None,sample_size=0.1,seed=N
     )
     yearly_proportions = yearly_proportions.div(yearly_proportions.sum(axis=1), axis=0)
     
-    plt.figure(figsize=(10, 6))
-    yearly_proportions.plot(
-        kind='area',
-        stacked=True,
-        alpha=0.7,
-        color=[colors[i] for i in range(num_clusters)]
-    )
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot each cluster separately to ensure correct color mapping
+    bottom = np.zeros(len(yearly_proportions))
+    for cluster in range(num_clusters):
+        if cluster in yearly_proportions.columns:
+            values = yearly_proportions[cluster].values
+            ax.fill_between(yearly_proportions.index, bottom, bottom + values, 
+                          alpha=0.7, label=f'Cluster {cluster}',
+                          color=colors[cluster])
+            bottom += values
+    
     plt.xlabel('Year')
     plt.ylabel('Proportion of Songs')
     plt.title('Evolution of Song Clusters Over Time')
+    plt.legend()
     plt.show()
 
 def plot_cluster_scatter(cluster_data, artist_name=None, dim_1=0, dim_2=1,sample_size=0.1,seed=None):
@@ -394,7 +399,7 @@ def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None)
     
     return cluster_means
 
-#demo
+
 #global
 plot_cluster_distribution(cluster_results)
 plot_cluster_evolution(cluster_results)
@@ -406,4 +411,30 @@ plot_cluster_evolution(cluster_results,"Coldplay")
 plot_cluster_scatter(cluster_results,"Coldplay")
 plot_cluster_radar(cluster_results,"Coldplay")
 
-# %%
+plot_cluster_distribution(cluster_results,"Taylor Swift")
+plot_cluster_evolution(cluster_results,"Taylor Swift")
+plot_cluster_scatter(cluster_results,"Taylor Swift")
+plot_cluster_radar(cluster_results,"Taylor Swift")
+
+# %% more artists
+plot_cluster_scatter(cluster_results,"Oasis")
+plot_cluster_radar(cluster_results,"Oasis")
+plot_cluster_evolution(cluster_results,"Oasis")
+plot_cluster_distribution(cluster_results,"Oasis")
+plot_cluster_distribution(cluster_results,"Metallica")
+plot_cluster_scatter(cluster_results,"Metallica")
+plot_cluster_radar(cluster_results,"Metallica")
+plot_cluster_evolution(cluster_results,"Metallica")
+plot_cluster_distribution(cluster_results,"Pink Floyd")
+plot_cluster_scatter(cluster_results,"Pink Floyd")
+plot_cluster_radar(cluster_results,"Pink Floyd")
+plot_cluster_evolution(cluster_results,"Pink Floyd")
+plot_cluster_distribution(cluster_results,"Radiohead")
+plot_cluster_scatter(cluster_results,"Radiohead")
+plot_cluster_radar(cluster_results,"Radiohead")
+plot_cluster_evolution(cluster_results,"Radiohead")
+plot_cluster_distribution(cluster_results,"Blur")
+plot_cluster_scatter(cluster_results,"Blur")
+plot_cluster_radar(cluster_results,"Blur")
+plot_cluster_evolution(cluster_results,"Blur")
+
