@@ -22,6 +22,7 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
+
 # Note potentially relevant features like danceability, energy, acousticness, etc.
 df.columns
 
@@ -224,6 +225,181 @@ optimal_n, features_pca, explained_variances, cumulative_variance = find_optimal
 features_pca.persist()
 optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca)
 
+#%% merge cluster results
+# merge to get cluster results
+merged_results = kmeans_predictions_pca.withColumn("tmp_id", F.monotonically_increasing_id()) \
+            .join(df_features.withColumn("tmp_id", F.monotonically_increasing_id()).withColumnRenamed("features", "raw_features"), on="tmp_id", how="inner").drop("tmp_id") \
+            .join(df,on=["id","name","artist"],how="inner")
+merged_results.show()
+merged_results.count()
+#examine cluster distribution
+merged_results.groupby('prediction') \
+               .count() \
+               .show()
+cluster_results=merged_results.filter(F.col("prediction") != 3)
+cluster_results.show()
+cluster_results.groupby('prediction') \
+               .count() \
+               .show()
+
+
+#%% visualization
+#%% extract a subset of data, for visualization
+def exact_to_pd(cluster_full_data,artist_name=None):
+    num_clusters = cluster_full_data.select('prediction').distinct().count()
+    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
+    if artist_name is None:
+        cluster_data = cluster_full_data.sample(False, 0.1, seed=42)  
+    else:
+        cluster_data = cluster_full_data.filter(F.col("artist") == artist_name)
+    cluster_data = cluster_data.toPandas()
+    cluster_data['year'] = pd.to_datetime(cluster_data['release_date']).dt.year
+    return num_clusters,colors,cluster_data
+
+def plot_cluster_distribution(cluster_data,artist_name=None):
+    """Plot distribution of songs across clusters"""
+    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name)
+ 
+    all_clusters = pd.Series(0, index=range(num_clusters))
+    cluster_counts = cluster_data['prediction'].value_counts()
+    cluster_counts = cluster_counts.combine_first(all_clusters)
+    cluster_counts = cluster_counts.sort_index()
+    
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(cluster_counts.index, cluster_counts.values)
+    for i, bar in enumerate(bars):
+        bar.set_color(colors[i])
+        
+    plt.xlabel('Cluster')
+    plt.ylabel('Number of Songs')
+    plt.title(f'Distribution of Songs Across Clusters')
+    plt.show()
+    
+    return cluster_counts
+plot_cluster_distribution(cluster_results,"Coldplay")
+
+def plot_cluster_evolution(cluster_data, artist_name=None):
+    """Plot evolution of clusters over time"""
+    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name)
+    
+    # Calculate proportion of each cluster per year
+    yearly_proportions = cluster_data.pivot_table(
+        index='year',
+        columns='prediction',
+        aggfunc='size',
+        fill_value=0
+    )
+    yearly_proportions = yearly_proportions.div(yearly_proportions.sum(axis=1), axis=0)
+    
+    plt.figure(figsize=(10, 6))
+    yearly_proportions.plot(
+        kind='area',
+        stacked=True,
+        alpha=0.7,
+        color=[colors[i] for i in range(num_clusters)]
+    )
+    plt.xlabel('Year')
+    plt.ylabel('Proportion of Songs')
+    plt.title('Evolution of Song Clusters Over Time')
+    plt.show()
+plot_cluster_evolution(cluster_results,"Coldplay")
+
+#%%
+
+def plot_cluster_scatter(cluster_data, artist_name, dim_1, dim_2):
+    """Plot scatter of clusters in PCA space"""
+    # Get cluster data
+    num_clusters, colors = exact_to_pd(cluster_data, artist_name)[:2]
+    markers = ['o', 's', '^', 'v', 'D', 'p', 'h']
+    
+    # Create plot
+    plt.figure(figsize=(10, 8))
+    
+    # Get artist data
+    artist_data = cluster_data.filter(F.col("artist") == artist_name) \
+                             .select("name", "prediction", "features") \
+                             .toPandas()
+
+    # Plot clusters
+    for cluster in artist_data["prediction"].unique():
+        cluster_data = artist_data[artist_data["prediction"] == cluster]
+        plt.scatter(cluster_data["features"].apply(lambda x: float(x[dim_1])),
+                   cluster_data["features"].apply(lambda x: float(x[dim_2])),
+                   c=[colors[cluster]], 
+                   marker=markers[cluster % len(markers)],
+                   label=f'Cluster {cluster}',
+                   s=100)
+
+    # Add song name labels
+    for _, row in artist_data.iterrows():
+        plt.annotate(row["name"], 
+                    (float(row["features"][dim_1]), float(row["features"][dim_2])),
+                    xytext=(5, 5),
+                    textcoords='offset points',
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7),
+                    fontsize=8)
+
+    plt.xlabel(f"Component {dim_1}")
+    plt.ylabel(f"Component {dim_2}")
+    plt.title("Songs Clustered in Dimensionally Reduced Space")
+    plt.legend()
+    plt.show()
+
+#%%
+
+def plot_feature_distributions(df_features, kmeans_predictions_pca, artist_name, feature_cols, num_clusters):
+    """Plot distribution of original features for each cluster"""
+    plt.figure(figsize=(15, 10))
+
+    artist_features = df_features.filter(F.col("artist") == artist_name) \
+        .withColumn("idx", F.monotonically_increasing_id())
+
+    predictions_with_idx = kmeans_predictions_pca \
+        .withColumn("idx", F.monotonically_increasing_id())
+
+    artist_features_with_clusters = artist_features.join(
+        predictions_with_idx.select("idx", "prediction"), 
+        on="idx"
+    ).select(
+        "prediction",
+        *[F.expr(f"features[{pos}]").alias(col) for pos, col in enumerate(feature_cols)]
+    )
+
+    features_pd = artist_features_with_clusters.toPandas()
+
+    n_features = len(feature_cols)
+    n_cols = 3
+    n_rows = (n_features + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 10))
+    axes = axes.flatten()
+
+    if len(features_pd) > 0:
+        existing_clusters = features_pd['prediction'].unique()
+        missing_clusters = [c for c in range(num_clusters) if c not in existing_clusters]
+        
+        if missing_clusters:
+            dummy_data = pd.DataFrame({
+                'prediction': missing_clusters,
+                **{col: [float('nan')] * len(missing_clusters) for col in feature_cols}
+            })
+            features_pd = pd.concat([features_pd, dummy_data], ignore_index=True)
+
+    for i, feature in enumerate(feature_cols):
+        ax = axes[i]
+        features_pd.boxplot(column=feature, by='prediction', ax=ax)
+        ax.set_title(f'{feature} by Cluster')
+        ax.set_xlabel('Cluster')
+        ax.set_xticklabels(range(num_clusters))
+
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+
+    plt.suptitle('Distribution of Features Across Clusters', y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+
 # %% visualize clusters for a specific artist
 
 def plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, num_clusters):
@@ -296,175 +472,23 @@ def plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, n
     plt.tight_layout()
     plt.show()
 
-def plot_cluster_distribution(artist_data, num_clusters):
-    """Plot distribution of songs across clusters"""
-    # Define consistent colors
-    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
-    
-    # Ensure all clusters are represented
-    all_clusters = pd.Series(0, index=range(num_clusters))
-    cluster_counts = artist_data['prediction'].value_counts()
-    cluster_counts = cluster_counts.combine_first(all_clusters)
-    cluster_counts = cluster_counts.sort_index()
-    
-    plt.figure(figsize=(10, 6))
-    bars = plt.bar(cluster_counts.index, cluster_counts.values)
-    for i, bar in enumerate(bars):
-        bar.set_color(colors[i])
-        
-    plt.xlabel('Cluster')
-    plt.ylabel('Number of Songs')
-    plt.title(f'Distribution of Songs Across Clusters')
-    plt.show()
-    
-    return cluster_counts
 
-def plot_cluster_evolution(artist_data, num_clusters):
-    """Plot evolution of clusters over time"""
-    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
-    
-    # Calculate proportion of each cluster per year
-    yearly_proportions = artist_data.pivot_table(
-        index='year',
-        columns='prediction',
-        aggfunc='size',
-        fill_value=0
-    )
-    yearly_proportions = yearly_proportions.div(yearly_proportions.sum(axis=1), axis=0)
-    
-    plt.figure(figsize=(10, 6))
-    yearly_proportions.plot(
-        kind='area',
-        stacked=True,
-        alpha=0.7,
-        color=[colors[i] for i in range(num_clusters)]
-    )
-    plt.xlabel('Year')
-    plt.ylabel('Proportion of Songs')
-    plt.title('Evolution of Song Clusters Over Time')
-    plt.show()
-
-def plot_cluster_scatter(df_merged, artist_name, num_clusters, dim_1, dim_2):
-    """Plot scatter of clusters in PCA space"""
-    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
-    markers = ['o', 's', '^', 'v', 'D', 'p', 'h']
-    
-    plt.figure(figsize=(10, 8))
-    
-    artist_matrix = df_merged.filter(F.col("artist") == artist_name) \
-                          .select("name", "prediction", "features") \
-                          .toPandas()
-
-    for cluster in artist_matrix["prediction"].unique():
-        mask = artist_matrix["prediction"] == cluster
-        plt.scatter(artist_matrix[mask]["features"].apply(lambda x: float(x[dim_1])),
-                   artist_matrix[mask]["features"].apply(lambda x: float(x[dim_2])),
-                   c=[colors[cluster]],
-                   marker=markers[cluster % len(markers)],
-                   label=f'Cluster {cluster}',
-                   s=100)
-
-    for i, txt in enumerate(artist_matrix["name"]):
-        x = float(artist_matrix["features"].iloc[i][dim_1])
-        y = float(artist_matrix["features"].iloc[i][dim_2])
-        plt.annotate(txt, (x, y),
-                xytext=(5, 5),
-                textcoords='offset points',
-                bbox=dict(facecolor='white', edgecolor='none', alpha=0.7),
-                fontsize=8)
-
-    plt.xlabel(f"Component {dim_1}")
-    plt.ylabel(f"Component {dim_2}")
-    plt.title(f"Songs Clustered in Dimensionally Reduced Space")
-    plt.legend()
-    plt.show()
-
-def plot_feature_distributions(df_features, kmeans_predictions_pca, artist_name, feature_cols, num_clusters):
-    """Plot distribution of original features for each cluster"""
-    plt.figure(figsize=(15, 10))
-
-    artist_features = df_features.filter(F.col("artist") == artist_name) \
-        .withColumn("idx", F.monotonically_increasing_id())
-
-    predictions_with_idx = kmeans_predictions_pca \
-        .withColumn("idx", F.monotonically_increasing_id())
-
-    artist_features_with_clusters = artist_features.join(
-        predictions_with_idx.select("idx", "prediction"), 
-        on="idx"
-    ).select(
-        "prediction",
-        *[F.expr(f"features[{pos}]").alias(col) for pos, col in enumerate(feature_cols)]
-    )
-
-    features_pd = artist_features_with_clusters.toPandas()
-
-    n_features = len(feature_cols)
-    n_cols = 3
-    n_rows = (n_features + n_cols - 1) // n_cols
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 10))
-    axes = axes.flatten()
-
-    if len(features_pd) > 0:
-        existing_clusters = features_pd['prediction'].unique()
-        missing_clusters = [c for c in range(num_clusters) if c not in existing_clusters]
-        
-        if missing_clusters:
-            dummy_data = pd.DataFrame({
-                'prediction': missing_clusters,
-                **{col: [float('nan')] * len(missing_clusters) for col in feature_cols}
-            })
-            features_pd = pd.concat([features_pd, dummy_data], ignore_index=True)
-
-    for i, feature in enumerate(feature_cols):
-        ax = axes[i]
-        features_pd.boxplot(column=feature, by='prediction', ax=ax)
-        ax.set_title(f'{feature} by Cluster')
-        ax.set_xlabel('Cluster')
-        ax.set_xticklabels(range(num_clusters))
-
-    for j in range(i + 1, len(axes)):
-        axes[j].set_visible(False)
-
-    plt.suptitle('Distribution of Features Across Clusters', y=1.02)
-    plt.tight_layout()
-    plt.show()
-
-def analyze_artist_clusters(predictions_df, original_df, artist_name, num_clusters, dim_1, dim_2):
+def analyze_artist_clusters(artist_data, num_clusters, dim_1, dim_2):
     """
     Analyze and visualize clustering results for a specific artist
     
     Args:
-        predictions_df: DataFrame with clustering predictions
-        original_df: Original DataFrame with all song information
+        artist_data: DataFrame with artist data
         artist_name: Name of the artist to analyze
         dim_1: index of the first dimension to plot
         dim_2: index of the second dimension to plot
     """
-    predictions_df.groupby('prediction') \
-               .count() \
-               .show()
-               
-    df_merged = predictions_df.withColumn("id", F.monotonically_increasing_id()) \
-            .join(original_df.withColumn("id", F.monotonically_increasing_id()).withColumnRenamed("features", "raw_features"), on="id", how="inner") 
-    
-    results = df_merged.join(
-        df.select('release_date', 'name', 'artist'), 
-        on=['name', 'artist'], 
-        how='left'
-    ).filter(F.col('artist') == artist_name)
-        
-    artist_data = results.toPandas()
-    artist_data['release_date'] = pd.to_datetime(artist_data['release_date'])
-    artist_data['year'] = artist_data['release_date'].dt.year
-
     # Plot all visualizations using the helper functions
     cluster_counts = plot_cluster_distribution(artist_data, num_clusters)
     plot_cluster_evolution(artist_data, num_clusters)
-    plot_cluster_scatter(df_merged, artist_name, num_clusters, dim_1, dim_2)
-    plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, num_clusters)
-    plot_feature_distributions(df_features, kmeans_predictions_pca, artist_name, feature_cols, num_clusters)
+    plot_cluster_scatter(artist_data, num_clusters, dim_1, dim_2)
+    plot_cluster_radar(artist_data, artist_name, feature_cols, num_clusters)
+    plot_feature_distributions(artist_data, artist_name, feature_cols, num_clusters)
 
     # Print summary statistics
     print(f"\nSummary for {artist_name}:")
@@ -475,8 +499,24 @@ def analyze_artist_clusters(predictions_df, original_df, artist_name, num_cluste
     return artist_data
 
 #demo
-artist_name="Coldplay"
+
 analyze_artist_clusters(kmeans_predictions_pca, df_features, artist_name,num_clusters=optimal_k_pca,dim_1=0,dim_2=1)
+
+
+
+
+#%% filter for artist and convert release date to year
+artist_name="Coldplay"
+artist_data = cluster_results.filter(F.col('artist') == artist_name).toPandas()
+artist_data['year'] = pd.to_datetime(artist_data['release_date']).dt.year
+print(artist_data.head())
+
+#%%
+
+
+
+
+
 
 #%%
 def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clusters):
@@ -488,6 +528,9 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
             .join(original_df.withColumn("id", F.monotonically_increasing_id())
                  .withColumnRenamed("features", "raw_features"), on="id", how="inner")
     
+    # Sample a subset of the data for visualization
+    df_merged = df_merged.sample(False, 0.1, seed=42)  # Sample 10% of data randomly
+    df_merged.show()
     # Calculate global means and standard deviations for standardization
     global_stats = df_merged.select([
         *[F.avg(F.expr(f"raw_features[{i}]")).alias(f"{col}_mean") for i, col in enumerate(feature_cols)],
@@ -526,6 +569,8 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
     
     # Plot data for each cluster
     for cluster in range(num_clusters):
+        if cluster == 3:
+            continue
         values = cluster_means_pd[cluster_means_pd['prediction'] == cluster][feature_cols].values
         if len(values) > 0 and not np.isnan(values).all():
             values = values[0]
@@ -551,4 +596,7 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
     plt.tight_layout()
     plt.show()
 
+
 plot_global_cluster_radar(kmeans_predictions_pca, df_features, feature_cols, optimal_k_pca)
+
+# %%

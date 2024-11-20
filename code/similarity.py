@@ -1,3 +1,4 @@
+
 # %% Load data and packages
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import SparkSession, Row
@@ -21,15 +22,9 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
-# clean data: remove songs by artist "0" and drop na
-df = df.filter(F.col("artist") != "0")
-print("number of rows after removing 0:", df.count())
-df = df.dropna()
-print("number of rows after dropping na:", df.count())
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
 df.columns
-
 
 # %% column names
 '''
@@ -95,7 +90,7 @@ features.printSchema()
 
 # %% K-means
 # try different numbers of clusters to find optimal k
-def find_optimal_kmeans(features, k_values=range(2, 10)):
+def find_optimal_kmeans(features, k_values=range(2, 6)):
     """
     Find optimal k for KMeans clustering using silhouette scores
     
@@ -225,10 +220,14 @@ def find_optimal_pca_components(features,threshold=0.9,k=None):
 
     return optimal_n, pca_features, explained_variances, cumulative_variance
 # 1. PCA: find optimal number of components
-optimal_n, features_pca, explained_variances, cumulative_variance = find_optimal_pca_components(features)
+optimal_n, features_pca, explained_variances, cumulative_variance = find_optimal_pca_components(features,k=2)
 # 2. KMeans: find optimal k, based on PCA-transformed features
 features_pca.persist()
 optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca)
+#examine cluster distribution
+kmeans_predictions_pca.groupby('prediction') \
+               .count() \
+               .show()
 
 # %% visualize clusters for a specific artist
 
@@ -448,9 +447,7 @@ def analyze_artist_clusters(predictions_df, original_df, artist_name, num_cluste
         dim_1: index of the first dimension to plot
         dim_2: index of the second dimension to plot
     """
-    predictions_df.groupby('prediction') \
-               .count() \
-               .show()
+    
                
     df_merged = predictions_df.withColumn("id", F.monotonically_increasing_id()) \
             .join(original_df.withColumn("id", F.monotonically_increasing_id()).withColumnRenamed("features", "raw_features"), on="id", how="inner") 
@@ -469,8 +466,8 @@ def analyze_artist_clusters(predictions_df, original_df, artist_name, num_cluste
     cluster_counts = plot_cluster_distribution(artist_data, num_clusters)
     plot_cluster_evolution(artist_data, num_clusters)
     plot_cluster_scatter(df_merged, artist_name, num_clusters, dim_1, dim_2)
-    #plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, num_clusters)
-    #plot_feature_distributions(df_features, kmeans_predictions_pca, artist_name, feature_cols, num_clusters)
+    plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, num_clusters)
+    #plot_feature_distributions(df_features, predictions_df, artist_name, feature_cols, num_clusters)
 
     # Print summary statistics
     print(f"\nSummary for {artist_name}:")
@@ -484,7 +481,7 @@ def analyze_artist_clusters(predictions_df, original_df, artist_name, num_cluste
 artist_name="Coldplay"
 analyze_artist_clusters(kmeans_predictions_pca, df_features, artist_name,num_clusters=optimal_k_pca,dim_1=0,dim_2=1)
 
-#%%  global cluster radar
+#%%
 def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clusters):
     """
     Create a radar plot to compare cluster centroids for all songs with standardized features
@@ -494,19 +491,20 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
             .join(original_df.withColumn("id", F.monotonically_increasing_id())
                  .withColumnRenamed("features", "raw_features"), on="id", how="inner")
     
-    # Add null value checks and handle potential zero standard deviations
+    # Sample a subset of the data for visualization
+    df_merged = df_merged.sample(False, 0.1, seed=42)  # Sample 10% of data randomly
+    df_merged.show()
+    # Calculate global means and standard deviations for standardization
     global_stats = df_merged.select([
         *[F.avg(F.expr(f"raw_features[{i}]")).alias(f"{col}_mean") for i, col in enumerate(feature_cols)],
-        *[F.when(F.stddev(F.expr(f"raw_features[{i}]")) == 0, F.lit(1))
-          .otherwise(F.stddev(F.expr(f"raw_features[{i}]")))
-          .alias(f"{col}_std") for i, col in enumerate(feature_cols)]
-    ]).na.fill(0).collect()[0]
-
-    # Add null handling for cluster means
+        *[F.stddev(F.expr(f"raw_features[{i}]")).alias(f"{col}_std") for i, col in enumerate(feature_cols)]
+    ]).collect()[0]
+    
+    # Calculate cluster means
     cluster_means = df_merged.groupBy("prediction").agg(*[
         F.avg(F.expr(f"raw_features[{i}]")).alias(col)
         for i, col in enumerate(feature_cols)
-    ]).na.fill(0)
+    ])
     
     # Convert to pandas for plotting
     cluster_means_pd = cluster_means.toPandas()
@@ -533,7 +531,9 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
     colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
     
     # Plot data for each cluster
-    for cluster in range(num_clusters-1):
+    for cluster in range(num_clusters):
+        if cluster == 3:
+            continue
         values = cluster_means_pd[cluster_means_pd['prediction'] == cluster][feature_cols].values
         if len(values) > 0 and not np.isnan(values).all():
             values = values[0]
@@ -560,51 +560,6 @@ def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clu
     plt.show()
 
 
-
 plot_global_cluster_radar(kmeans_predictions_pca, df_features, feature_cols, optimal_k_pca)
-
-# %%
-# Show items in cluster 0
-def show_cluster_items(predictions_df, original_df, cluster_num, n=10):
-    """
-    Show top n items in a specific cluster
-    
-    Args:
-        predictions_df: DataFrame with cluster predictions
-        original_df: Original DataFrame with features and metadata
-        cluster_num: Cluster number to show
-        n: Number of items to show
-    """
-    # Merge predictions with original features
-    df_merged = predictions_df.withColumn("id", F.monotonically_increasing_id()) \
-            .join(original_df.withColumn("id", F.monotonically_increasing_id()), 
-                  on="id", how="inner")
-    
-    # Filter for specific cluster
-    cluster_items = df_merged.filter((F.col("prediction") == cluster_num) ) \
-                           .select("name", "artist")
-    
-    # Show n random items from cluster
-    print(f"\nRandom {n} items from Cluster {cluster_num}:")
-    cluster_items.orderBy(F.rand()).limit(n).show(truncate=False)
-    
-    # Show most common artists in cluster
-    print(f"\nMost common artists in Cluster {cluster_num}:")
-    cluster_items.groupBy("artist") \
-                .count() \
-                .orderBy("count", ascending=False) \
-                .limit(5) \
-                .show(truncate=False)
-
-# Show items in cluster 3
-show_cluster_items(kmeans_predictions_pca, df_features, 3)
-
-# %%
-# Search for specific song
-artist_name = "0"
-song_info = df.filter(F.col("artist") != artist_name)
-song_info.show(truncate=False)
-song_info.count()
-
 
 # %%
