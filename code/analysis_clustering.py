@@ -244,21 +244,24 @@ cluster_results.groupby('prediction') \
 
 
 #%% visualization
-def exact_to_pd(cluster_full_data,artist_name=None):
+def exact_to_pd(cluster_full_data,artist_name=None,sample_size=0.1,seed=None):
     '''extract a subset of data, for visualization'''
     num_clusters = cluster_full_data.select('prediction').distinct().count()
     colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
     if artist_name is None:
-        cluster_data = cluster_full_data.sample(False, 0.1, seed=42)  
+        if seed is None:
+            cluster_data = cluster_full_data.sample(False, sample_size)  
+        else:
+            cluster_data = cluster_full_data.sample(False, sample_size, seed=seed)  
     else:
         cluster_data = cluster_full_data.filter(F.col("artist") == artist_name)
     cluster_data = cluster_data.toPandas()
     cluster_data['year'] = pd.to_datetime(cluster_data['release_date']).dt.year
     return num_clusters,colors,cluster_data
 
-def plot_cluster_distribution(cluster_data,artist_name=None):
+def plot_cluster_distribution(cluster_data,artist_name=None,sample_size=0.1,seed=None):
     """Plot distribution of songs across clusters"""
-    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name)
+    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name,sample_size,seed)
  
     all_clusters = pd.Series(0, index=range(num_clusters))
     cluster_counts = cluster_data['prediction'].value_counts()
@@ -277,9 +280,9 @@ def plot_cluster_distribution(cluster_data,artist_name=None):
     
     return cluster_counts
 
-def plot_cluster_evolution(cluster_data, artist_name=None):
+def plot_cluster_evolution(cluster_data, artist_name=None,sample_size=0.1,seed=None):
     """Plot evolution of clusters over time"""
-    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name)
+    num_clusters,colors,cluster_data=exact_to_pd(cluster_data,artist_name,sample_size,seed)
     
     # Calculate proportion of each cluster per year
     yearly_proportions = cluster_data.pivot_table(
@@ -302,9 +305,9 @@ def plot_cluster_evolution(cluster_data, artist_name=None):
     plt.title('Evolution of Song Clusters Over Time')
     plt.show()
 
-def plot_cluster_scatter(cluster_data, artist_name=None, dim_1=0, dim_2=1):
+def plot_cluster_scatter(cluster_data, artist_name=None, dim_1=0, dim_2=1,sample_size=0.1,seed=None):
     """Plot scatter of clusters in PCA space"""
-    num_clusters, colors,cluster_data=exact_to_pd(cluster_data, artist_name)
+    num_clusters, colors,cluster_data=exact_to_pd(cluster_data, artist_name,sample_size,seed)
     markers = ['o', 's', '^', 'v', 'D', 'p', 'h']
     plt.figure(figsize=(10, 8))
     for cluster in range(num_clusters):
@@ -328,7 +331,7 @@ def plot_cluster_scatter(cluster_data, artist_name=None, dim_1=0, dim_2=1):
     plt.legend()
     plt.show()
 
-def plot_cluster_radar(cluster_data, artist_name=None):
+def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None):
     """
     Create a radar plot to compare cluster centroids with standardized features
     
@@ -337,7 +340,7 @@ def plot_cluster_radar(cluster_data, artist_name=None):
         artist_name: Optional artist name to filter data
     """
     # Extract data and get number of clusters
-    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name)
+    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name,sample_size,seed)
     
     # Get feature values from the features column
     feature_values = pd.DataFrame(cluster_data['raw_features'].tolist(), 
