@@ -12,6 +12,7 @@ import pyspark.sql.functions as F
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.animation as animation
 
 
 spark = SparkSession \
@@ -90,7 +91,7 @@ features.printSchema()
 
 # %% K-means
 # try different numbers of clusters to find optimal k
-def find_optimal_kmeans(features, k_values=range(2, 13)):
+def find_optimal_kmeans(features, k_values=range(3, 5)):
     """
     Find optimal k for KMeans clustering using silhouette scores
     
@@ -242,7 +243,7 @@ cluster_results.groupby('prediction') \
                .show()
 
 
-#%% visualization
+#%% visualization functions
 def exact_to_pd(cluster_full_data,artist_name=None,sample_size=0.1,seed=None):
     '''extract a subset of data, for visualization'''
     num_clusters = cluster_full_data.select('prediction').distinct().count()
@@ -400,6 +401,118 @@ def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None)
     return cluster_means
 
 
+#%% dynamic evolution scatter plot
+import matplotlib.animation as animation
+
+def plot_cluster_animation(cluster_data, artist_name=None, dim_1=0, dim_2=1, sample_size=0.1, seed=None, interval=1000):
+    """
+    Create an animated scatter plot showing cluster evolution over time
+    """
+    # Get data
+    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
+    
+    # Sort by year for animation
+    cluster_data = cluster_data.sort_values('year')
+    years = sorted(cluster_data['year'].unique())
+    
+    # Set up the figure and animation
+    fig, ax = plt.subplots(figsize=(12, 8))
+    markers = ['o', 's', '^', 'v', 'D', 'p', 'h']
+    
+    def animate(frame_year):
+        ax.clear()
+        
+        # Plot historical data (previous years) with lower alpha
+        historical_data = cluster_data[cluster_data['year'] < frame_year]
+        if not historical_data.empty:
+            for cluster in range(num_clusters):
+                plot_data = historical_data[historical_data["prediction"] == cluster]
+                if not plot_data.empty:
+                    ax.scatter(plot_data["features"].apply(lambda x: float(x[dim_1])),
+                             plot_data["features"].apply(lambda x: float(x[dim_2])),
+                             c=[colors[cluster]], 
+                             marker=markers[cluster % len(markers)],
+                             label=f'Cluster {cluster} (historical)',
+                             alpha=0.3,  # Lower alpha for historical data
+                             s=80)
+        
+        # Plot current year data with higher alpha and larger markers
+        current_data = cluster_data[cluster_data['year'] == frame_year]
+        if not current_data.empty:
+            for cluster in range(num_clusters):
+                plot_data = current_data[current_data["prediction"] == cluster]
+                if not plot_data.empty:
+                    ax.scatter(plot_data["features"].apply(lambda x: float(x[dim_1])),
+                             plot_data["features"].apply(lambda x: float(x[dim_2])),
+                             c=[colors[cluster]], 
+                             marker=markers[cluster % len(markers)],
+                             label=f'Cluster {cluster} ({frame_year})',
+                             alpha=1.0,  # Full alpha for current year
+                             s=150,  # Larger markers for current year
+                             edgecolor='black')
+                    
+                    # Add song names for current year
+                    for _, row in plot_data.iterrows():
+                        ax.annotate(f"{row['name']} ({frame_year})",
+                                  (float(row["features"][dim_1]), float(row["features"][dim_2])),
+                                  xytext=(5, 5),
+                                  textcoords='offset points',
+                                  bbox=dict(facecolor='white', edgecolor='none', alpha=0.7),
+                                  fontsize=8)
+        
+        # Set labels and title
+        ax.set_xlabel(f"Component {dim_1}")
+        ax.set_ylabel(f"Component {dim_2}")
+        title = f"Songs Clustered in PCA Space\nYear: {frame_year}"
+        if artist_name:
+            title = f"{artist_name}: {title}"
+        ax.set_title(title)
+        
+        # Add year count information
+        current_count = len(current_data)
+        total_count = len(cluster_data[cluster_data['year'] <= frame_year])
+        ax.text(0.02, 0.98, f"New songs in {frame_year}: {current_count}\nTotal songs: {total_count}",
+                transform=ax.transAxes, bbox=dict(facecolor='white', alpha=0.7),
+                verticalalignment='top')
+        
+        # Set consistent axis limits
+        all_x = cluster_data["features"].apply(lambda x: float(x[dim_1]))
+        all_y = cluster_data["features"].apply(lambda x: float(x[dim_2]))
+        ax.set_xlim(all_x.min() - 0.5, all_x.max() + 0.5)
+        ax.set_ylim(all_y.min() - 0.5, all_y.max() + 0.5)
+        
+        # Customize legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+    
+    if not years:
+        print("No data available for animation")
+        return None
+    
+    ani = animation.FuncAnimation(fig, animate, frames=years,
+                                interval=interval, repeat=True)
+    
+    # Save animation
+    try:
+        ani.save(f'cluster_animation{"_" + artist_name if artist_name else ""}.gif',
+                writer='pillow', fps=1)
+        print(f"Animation saved successfully!")
+    except Exception as e:
+        print(f"Could not save animation: {e}")
+    
+    plt.show()
+    return ani
+
+# Example usage:
+try:
+    ani = plot_cluster_animation(cluster_results, "Metallica", interval=1000)
+    if ani is None:
+        print("Animation could not be created")
+except Exception as e:
+    print(f"Error creating animation: {e}")
+
+#%% visualization
+
 #global
 plot_cluster_distribution(cluster_results)
 plot_cluster_evolution(cluster_results)
@@ -415,6 +528,9 @@ plot_cluster_distribution(cluster_results,"Taylor Swift")
 plot_cluster_evolution(cluster_results,"Taylor Swift")
 plot_cluster_scatter(cluster_results,"Taylor Swift")
 plot_cluster_radar(cluster_results,"Taylor Swift")
+
+
+
 
 # %% more artists
 plot_cluster_scatter(cluster_results,"Oasis")
@@ -438,3 +554,194 @@ plot_cluster_scatter(cluster_results,"Blur")
 plot_cluster_radar(cluster_results,"Blur")
 plot_cluster_evolution(cluster_results,"Blur")
 
+# %% similarity analysis based on centroid evolution of PCA space
+
+def analyze_artist_evolution(cluster_results, artist_name, time_decay=0.9):
+    """
+    Analyze artist evolution using cluster centroids and time-weighted similarities
+    
+    Args:
+        cluster_results: DataFrame with PCA features and metadata
+        artist_name: Name of the artist to analyze
+        time_decay: Decay factor for historical similarities (0-1)
+    """
+    # Extract artist data and convert to pandas
+    artist_data = cluster_results.filter(F.col("artist") == artist_name).toPandas()
+    artist_data['year'] = pd.to_datetime(artist_data['release_date']).dt.year
+    artist_data['feature_array'] = artist_data['features'].apply(lambda x: np.array(x.toArray()))
+    
+    # Initialize results
+    yearly_cohesion = {}
+    evolution_scores = {}
+    yearly_centroids = {}
+    
+    # Calculate yearly centroids and cohesion
+    for year in sorted(artist_data['year'].unique()):
+        year_songs = artist_data[artist_data['year'] == year]
+        features = np.stack(year_songs['feature_array'].values)
+        n_songs = len(year_songs)
+        
+        # Calculate centroid
+        centroid = np.mean(features, axis=0)
+        yearly_centroids[year] = centroid
+        
+        # Calculate cohesion (average distance to centroid)
+        if n_songs == 1:
+            mean_distance = np.nan  # Set to 1 if only one song
+        else:
+            distances = [np.linalg.norm(f - centroid) for f in features]
+            mean_distance = np.mean(distances)
+            
+        yearly_cohesion[year] = {
+            'mean_distance': mean_distance,
+            'n_songs': n_songs
+        }
+    
+    # Calculate evolution scores
+    years = sorted(yearly_centroids.keys())
+    for i, current_year in enumerate(years[1:], 1):
+        current_centroid = yearly_centroids[current_year]
+        
+        weighted_similarities = []
+        weights = []
+        
+        for past_year in years[:i]:
+            past_centroid = yearly_centroids[past_year]
+            time_diff = current_year - past_year
+            weight = time_decay ** time_diff
+            
+            similarity = np.dot(current_centroid, past_centroid) / \
+                        (np.linalg.norm(current_centroid) * np.linalg.norm(past_centroid))
+            
+            weighted_similarities.append(similarity * weight)
+            weights.append(weight)
+        
+        evolution_scores[current_year] = {
+            'evolution_score': 1 - (sum(weighted_similarities) / sum(weights)),
+            'n_previous_years': len(weighted_similarities)
+        }
+    
+    # Visualization
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Plot 1: Cluster Cohesion
+    years = list(yearly_cohesion.keys())
+    means = [d['mean_distance'] for d in yearly_cohesion.values()]
+    
+    ax1.plot(years, means, 'o-')
+    ax1.set_xlabel('Year')
+    ax1.set_ylabel('Average Distance to Centroid')
+    ax1.set_title(f'{artist_name}: Yearly Cluster Cohesion')
+    
+    # Plot 2: Evolution Scores
+    years = list(evolution_scores.keys())
+    scores = [d['evolution_score'] for d in evolution_scores.values()]
+    
+    ax2.plot(years, scores, 'o-')
+    ax2.set_xlabel('Year')
+    ax2.set_ylabel('Evolution Score')
+    ax2.set_title(f'{artist_name}: Musical Evolution Score')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return yearly_cohesion, evolution_scores
+
+# Example usage:
+cohesion, evolution = analyze_artist_evolution(cluster_results, "Coldplay")
+
+# %%
+
+def analyze_artist_evolution(cluster_results, artist_name, time_decay=0.9):
+    """
+    Analyze artist evolution using cluster centroids and time-weighted similarities
+    
+    Args:
+        cluster_results: DataFrame with PCA features and metadata
+        artist_name: Name of the artist to analyze
+        time_decay: Decay factor for historical similarities (0-1)
+    """
+    # Extract artist data and convert to pandas
+    artist_data = cluster_results.filter(F.col("artist") == artist_name).toPandas()
+    artist_data['year'] = pd.to_datetime(artist_data['release_date']).dt.year
+    artist_data['feature_array'] = artist_data['features'].apply(lambda x: np.array(x.toArray()))
+    
+    # Initialize results
+    yearly_cohesion = {}
+    evolution_scores = {}
+    yearly_centroids = {}
+    
+    # Calculate yearly centroids and cohesion
+    for year in sorted(artist_data['year'].unique()):
+        year_songs = artist_data[artist_data['year'] == year]
+        features = np.stack(year_songs['feature_array'].values)
+        n_songs = len(year_songs)
+        
+        # Calculate centroid
+        centroid = np.mean(features, axis=0)
+        yearly_centroids[year] = centroid
+        
+        # Calculate cohesion (average distance to centroid)
+        if n_songs == 1:
+            mean_distance = np.nan  # Set to 1 if only one song
+        else:
+            distances = [np.linalg.norm(f - centroid) for f in features]
+            mean_distance = np.mean(distances)
+            
+        yearly_cohesion[year] = {
+            'mean_distance': mean_distance,
+            'n_songs': n_songs
+        }
+    
+    # Calculate evolution scores
+    years = sorted(yearly_centroids.keys())
+    for i, current_year in enumerate(years[1:], 1):
+        current_centroid = yearly_centroids[current_year]
+        
+        weighted_similarities = []
+        weights = []
+        
+        for past_year in years[:i]:
+            past_centroid = yearly_centroids[past_year]
+            time_diff = current_year - past_year
+            weight = time_decay ** time_diff
+            
+            similarity = np.dot(current_centroid, past_centroid) / \
+                        (np.linalg.norm(current_centroid) * np.linalg.norm(past_centroid))
+            
+            weighted_similarities.append(similarity * weight)
+            weights.append(weight)
+        
+        evolution_scores[current_year] = {
+            'evolution_score': 1 - (sum(weighted_similarities) / sum(weights)),
+            'n_previous_years': len(weighted_similarities)
+        }
+    
+    # Visualization
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Plot 1: Cluster Cohesion
+    years = list(yearly_cohesion.keys())
+    means = [d['mean_distance'] for d in yearly_cohesion.values()]
+    
+    ax1.plot(years, means, 'o-')
+    ax1.set_xlabel('Year')
+    ax1.set_ylabel('Average Distance to Centroid')
+    ax1.set_title(f'{artist_name}: Yearly Cluster Cohesion')
+    
+    # Plot 2: Evolution Scores
+    years = list(evolution_scores.keys())
+    scores = [d['evolution_score'] for d in evolution_scores.values()]
+    
+    ax2.plot(years, scores, 'o-')
+    ax2.set_xlabel('Year')
+    ax2.set_ylabel('Evolution Score')
+    ax2.set_title(f'{artist_name}: Musical Evolution Score')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return yearly_cohesion, evolution_scores
+
+# Example usage:
+cohesion, evolution = analyze_artist_evolution(cluster_results, "Coldplay")
