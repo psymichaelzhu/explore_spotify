@@ -244,8 +244,8 @@ cluster_results.groupby('prediction') \
 
 
 #%% visualization
-#%% extract a subset of data, for visualization
 def exact_to_pd(cluster_full_data,artist_name=None):
+    '''extract a subset of data, for visualization'''
     num_clusters = cluster_full_data.select('prediction').distinct().count()
     colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
     if artist_name is None:
@@ -276,7 +276,6 @@ def plot_cluster_distribution(cluster_data,artist_name=None):
     plt.show()
     
     return cluster_counts
-plot_cluster_distribution(cluster_results,"Coldplay")
 
 def plot_cluster_evolution(cluster_data, artist_name=None):
     """Plot evolution of clusters over time"""
@@ -302,301 +301,106 @@ def plot_cluster_evolution(cluster_data, artist_name=None):
     plt.ylabel('Proportion of Songs')
     plt.title('Evolution of Song Clusters Over Time')
     plt.show()
-plot_cluster_evolution(cluster_results,"Coldplay")
 
-#%%
-
-def plot_cluster_scatter(cluster_data, artist_name, dim_1, dim_2):
+def plot_cluster_scatter(cluster_data, artist_name=None, dim_1=0, dim_2=1):
     """Plot scatter of clusters in PCA space"""
-    # Get cluster data
-    num_clusters, colors = exact_to_pd(cluster_data, artist_name)[:2]
+    num_clusters, colors,cluster_data=exact_to_pd(cluster_data, artist_name)
     markers = ['o', 's', '^', 'v', 'D', 'p', 'h']
-    
-    # Create plot
     plt.figure(figsize=(10, 8))
-    
-    # Get artist data
-    artist_data = cluster_data.filter(F.col("artist") == artist_name) \
-                             .select("name", "prediction", "features") \
-                             .toPandas()
-
-    # Plot clusters
-    for cluster in artist_data["prediction"].unique():
-        cluster_data = artist_data[artist_data["prediction"] == cluster]
-        plt.scatter(cluster_data["features"].apply(lambda x: float(x[dim_1])),
-                   cluster_data["features"].apply(lambda x: float(x[dim_2])),
+    for cluster in range(num_clusters):
+        plot_data = cluster_data[cluster_data["prediction"] == cluster]
+        plt.scatter(plot_data["features"].apply(lambda x: float(x[dim_1])),
+                   plot_data["features"].apply(lambda x: float(x[dim_2])),
                    c=[colors[cluster]], 
                    marker=markers[cluster % len(markers)],
                    label=f'Cluster {cluster}',
                    s=100)
-
-    # Add song name labels
-    for _, row in artist_data.iterrows():
-        plt.annotate(row["name"], 
-                    (float(row["features"][dim_1]), float(row["features"][dim_2])),
+        for _, row in plot_data.iterrows():
+            plt.annotate(row["name"], 
+                        (float(row["features"][dim_1]), float(row["features"][dim_2])),
                     xytext=(5, 5),
-                    textcoords='offset points',
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7),
-                    fontsize=8)
-
+                        textcoords='offset points',
+                        bbox=dict(facecolor='white', edgecolor='none', alpha=0.7),
+                        fontsize=8)
     plt.xlabel(f"Component {dim_1}")
     plt.ylabel(f"Component {dim_2}")
     plt.title("Songs Clustered in Dimensionally Reduced Space")
     plt.legend()
     plt.show()
 
-#%%
-
-def plot_feature_distributions(df_features, kmeans_predictions_pca, artist_name, feature_cols, num_clusters):
-    """Plot distribution of original features for each cluster"""
-    plt.figure(figsize=(15, 10))
-
-    artist_features = df_features.filter(F.col("artist") == artist_name) \
-        .withColumn("idx", F.monotonically_increasing_id())
-
-    predictions_with_idx = kmeans_predictions_pca \
-        .withColumn("idx", F.monotonically_increasing_id())
-
-    artist_features_with_clusters = artist_features.join(
-        predictions_with_idx.select("idx", "prediction"), 
-        on="idx"
-    ).select(
-        "prediction",
-        *[F.expr(f"features[{pos}]").alias(col) for pos, col in enumerate(feature_cols)]
-    )
-
-    features_pd = artist_features_with_clusters.toPandas()
-
-    n_features = len(feature_cols)
-    n_cols = 3
-    n_rows = (n_features + n_cols - 1) // n_cols
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 10))
-    axes = axes.flatten()
-
-    if len(features_pd) > 0:
-        existing_clusters = features_pd['prediction'].unique()
-        missing_clusters = [c for c in range(num_clusters) if c not in existing_clusters]
-        
-        if missing_clusters:
-            dummy_data = pd.DataFrame({
-                'prediction': missing_clusters,
-                **{col: [float('nan')] * len(missing_clusters) for col in feature_cols}
-            })
-            features_pd = pd.concat([features_pd, dummy_data], ignore_index=True)
-
-    for i, feature in enumerate(feature_cols):
-        ax = axes[i]
-        features_pd.boxplot(column=feature, by='prediction', ax=ax)
-        ax.set_title(f'{feature} by Cluster')
-        ax.set_xlabel('Cluster')
-        ax.set_xticklabels(range(num_clusters))
-
-    for j in range(i + 1, len(axes)):
-        axes[j].set_visible(False)
-
-    plt.suptitle('Distribution of Features Across Clusters', y=1.02)
-    plt.tight_layout()
-    plt.show()
-
-
-# %% visualize clusters for a specific artist
-
-def plot_cluster_radar(predictions_df, original_df, artist_name, feature_cols, num_clusters):
+def plot_cluster_radar(cluster_data, artist_name=None):
     """
-    Create a radar plot to compare cluster centroids for a specific artist with standardized features
+    Create a radar plot to compare cluster centroids with standardized features
+    
+    Args:
+        cluster_data: DataFrame with cluster predictions and features
+        artist_name: Optional artist name to filter data
     """
-    # Merge predictions with original features
-    df_merged = predictions_df.withColumn("id", F.monotonically_increasing_id()) \
-            .join(original_df.withColumn("id", F.monotonically_increasing_id())
-                 .withColumnRenamed("features", "raw_features"), on="id", how="inner")
+    # Extract data and get number of clusters
+    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name)
+    
+    # Get feature values from the features column
+    feature_values = pd.DataFrame(cluster_data['raw_features'].tolist(), 
+                                columns=feature_cols)
     
     # Calculate global means and standard deviations for standardization
-    global_stats = df_merged.select([
-        *[F.avg(F.expr(f"raw_features[{i}]")).alias(f"{col}_mean") for i, col in enumerate(feature_cols)],
-        *[F.stddev(F.expr(f"raw_features[{i}]")).alias(f"{col}_std") for i, col in enumerate(feature_cols)]
-    ]).collect()[0]
+    global_means = feature_values[feature_cols].mean()
+    global_stds = feature_values[feature_cols].std()
     
-    # Filter for specific artist
-    artist_data = df_merged.filter(F.col("artist") == artist_name)
+    # Standardize features
+    standardized_values = feature_values.copy()
+    for col in feature_cols:
+        if global_stds[col] > 0:  # Avoid division by zero
+            standardized_values[col] = (feature_values[col] - global_means[col]) / global_stds[col]
+        else:
+            standardized_values[col] = N
     
-    # Calculate cluster means and standardize them
-    cluster_means = artist_data.groupBy("prediction").agg(*[
-        F.avg(F.expr(f"raw_features[{i}]")).alias(col)
-        for i, col in enumerate(feature_cols)
-    ])
+    # Add prediction column
+    standardized_values['prediction'] = cluster_data['prediction']
     
-    # Convert to pandas for plotting
-    cluster_means_pd = cluster_means.toPandas()
+    # Calculate mean values for each cluster using standardized features
+    cluster_means = standardized_values.groupby('prediction')[feature_cols].mean()
     
-    # Ensure all clusters are represented
-    all_clusters = pd.DataFrame({'prediction': range(num_clusters)})
-    cluster_means_pd = pd.merge(all_clusters, cluster_means_pd, on='prediction', how='left')
-    
-    # Standardize the means using global statistics
-    for i, col in enumerate(feature_cols):
-        mean_val = global_stats[f"{col}_mean"]
-        std_val = global_stats[f"{col}_std"]
-        if std_val > 0:  # Avoid division by zero
-            cluster_means_pd[col] = (cluster_means_pd[col] - mean_val) / std_val
-    
-    # Set up the angles for
+    # Set up the angles for radar plot
     angles = np.linspace(0, 2*np.pi, len(feature_cols), endpoint=False)
     angles = np.concatenate((angles, [angles[0]]))  # Close the circle
     
     # Set up the plot
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
     
-    # Define colors
-    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
-    
     # Plot data for each cluster
     for cluster in range(num_clusters):
-        values = cluster_means_pd[cluster_means_pd['prediction'] == cluster][feature_cols].values
-        if len(values) > 0 and not np.isnan(values).all():
-            values = values[0]
+        if cluster in cluster_means.index:
+            values = cluster_means.loc[cluster].values
             values = np.concatenate((values, [values[0]]))  # Close the polygon
             
-            ax.plot(angles, values, 'o-', linewidth=2, label=f'Cluster {cluster}', 
+            ax.plot(angles, values, 'o-', linewidth=2, 
+                   label=f'Cluster {cluster}', 
                    color=colors[cluster])
             ax.fill(angles, values, alpha=0.25, color=colors[cluster])
-    
-    # Set the labels
+
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(feature_cols, size=8)
-    
-    # Add legend
-    plt.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
-    
-    plt.title(f"Cluster Characteristics for {artist_name}")
+    ax.set_xticklabels(feature_cols, size=15)
+    plt.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1), fontsize=12)
+    title = "Cluster Characteristics"
+    if artist_name:
+        title += f" for {artist_name}"
+    plt.title(title, fontsize=17)
     plt.tight_layout()
     plt.show()
-
-
-def analyze_artist_clusters(artist_data, num_clusters, dim_1, dim_2):
-    """
-    Analyze and visualize clustering results for a specific artist
     
-    Args:
-        artist_data: DataFrame with artist data
-        artist_name: Name of the artist to analyze
-        dim_1: index of the first dimension to plot
-        dim_2: index of the second dimension to plot
-    """
-    # Plot all visualizations using the helper functions
-    cluster_counts = plot_cluster_distribution(artist_data, num_clusters)
-    plot_cluster_evolution(artist_data, num_clusters)
-    plot_cluster_scatter(artist_data, num_clusters, dim_1, dim_2)
-    plot_cluster_radar(artist_data, artist_name, feature_cols, num_clusters)
-    plot_feature_distributions(artist_data, artist_name, feature_cols, num_clusters)
-
-    # Print summary statistics
-    print(f"\nSummary for {artist_name}:")
-    print(f"Total number of songs: {len(artist_data)}")
-    print("\nSongs per cluster:")
-    print(cluster_counts)
-    
-    return artist_data
+    return cluster_means
 
 #demo
-
-analyze_artist_clusters(kmeans_predictions_pca, df_features, artist_name,num_clusters=optimal_k_pca,dim_1=0,dim_2=1)
-
-
-
-
-#%% filter for artist and convert release date to year
-artist_name="Coldplay"
-artist_data = cluster_results.filter(F.col('artist') == artist_name).toPandas()
-artist_data['year'] = pd.to_datetime(artist_data['release_date']).dt.year
-print(artist_data.head())
-
-#%%
-
-
-
-
-
-
-#%%
-def plot_global_cluster_radar(predictions_df, original_df, feature_cols, num_clusters):
-    """
-    Create a radar plot to compare cluster centroids for all songs with standardized features
-    """
-    # Merge predictions with original features
-    df_merged = predictions_df.withColumn("id", F.monotonically_increasing_id()) \
-            .join(original_df.withColumn("id", F.monotonically_increasing_id())
-                 .withColumnRenamed("features", "raw_features"), on="id", how="inner")
-    
-    # Sample a subset of the data for visualization
-    df_merged = df_merged.sample(False, 0.1, seed=42)  # Sample 10% of data randomly
-    df_merged.show()
-    # Calculate global means and standard deviations for standardization
-    global_stats = df_merged.select([
-        *[F.avg(F.expr(f"raw_features[{i}]")).alias(f"{col}_mean") for i, col in enumerate(feature_cols)],
-        *[F.stddev(F.expr(f"raw_features[{i}]")).alias(f"{col}_std") for i, col in enumerate(feature_cols)]
-    ]).collect()[0]
-    
-    # Calculate cluster means
-    cluster_means = df_merged.groupBy("prediction").agg(*[
-        F.avg(F.expr(f"raw_features[{i}]")).alias(col)
-        for i, col in enumerate(feature_cols)
-    ])
-    
-    # Convert to pandas for plotting
-    cluster_means_pd = cluster_means.toPandas()
-    
-    # Ensure all clusters are represented
-    all_clusters = pd.DataFrame({'prediction': range(num_clusters)})
-    cluster_means_pd = pd.merge(all_clusters, cluster_means_pd, on='prediction', how='left')
-    
-    # Standardize the means using global statistics
-    for i, col in enumerate(feature_cols):
-        mean_val = global_stats[f"{col}_mean"]
-        std_val = global_stats[f"{col}_std"]
-        if std_val > 0:  # Avoid division by zero
-            cluster_means_pd[col] = (cluster_means_pd[col] - mean_val) / std_val
-    
-    # Set up the angles
-    angles = np.linspace(0, 2*np.pi, len(feature_cols), endpoint=False)
-    angles = np.concatenate((angles, [angles[0]]))  # Close the circle
-    
-    # Set up the plot
-    fig, ax = plt.subplots(figsize=(12, 12), subplot_kw=dict(projection='polar'))
-    
-    # Define colors
-    colors = plt.cm.Dark2(np.linspace(0, 1, num_clusters))
-    
-    # Plot data for each cluster
-    for cluster in range(num_clusters):
-        if cluster == 3:
-            continue
-        values = cluster_means_pd[cluster_means_pd['prediction'] == cluster][feature_cols].values
-        if len(values) > 0 and not np.isnan(values).all():
-            values = values[0]
-            values = np.concatenate((values, [values[0]]))  # Close the polygon
-            
-            ax.plot(angles, values, 'o-', linewidth=2, label=f'Cluster {cluster}', 
-                   color=colors[cluster])
-            ax.fill(angles, values, alpha=0.25, color=colors[cluster])
-    
-    # Add feature labels
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(feature_cols, size=10)
-    
-    # Add gridlines and adjust their style
-    ax.grid(True, alpha=0.3)
-    
-    # Add legend with a better position
-    plt.legend(loc='upper right', bbox_to_anchor=(0.1, 0.1))
-    
-    # Add title
-    plt.title("Global Cluster Characteristics", pad=20, size=14)
-    
-    plt.tight_layout()
-    plt.show()
-
-
-plot_global_cluster_radar(kmeans_predictions_pca, df_features, feature_cols, optimal_k_pca)
+#global
+plot_cluster_distribution(cluster_results)
+plot_cluster_evolution(cluster_results)
+plot_cluster_radar(cluster_results)
+#plot_cluster_scatter(cluster_results) # too many points
+#individual
+plot_cluster_distribution(cluster_results,"Coldplay")
+plot_cluster_evolution(cluster_results,"Coldplay")
+plot_cluster_scatter(cluster_results,"Coldplay")
+plot_cluster_radar(cluster_results,"Coldplay")
 
 # %%
