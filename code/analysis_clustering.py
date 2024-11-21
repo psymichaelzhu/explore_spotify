@@ -1130,7 +1130,7 @@ plot_centroid_evolution(cluster_results, sample_size=0.1)
 
 
 
-# %% plot yearly movement vectors
+# %% plot yearly centroids movement vectors
 def plot_yearly_movement_vectors(cluster_data, artist_name=None, sample_size=0.1, seed=None):
     """
     Plot yearly movement vectors with tails at origin to compare directions and magnitudes
@@ -1214,5 +1214,277 @@ def plot_yearly_movement_vectors(cluster_data, artist_name=None, sample_size=0.1
 plot_yearly_movement_vectors(cluster_results, sample_size=0.1)
 
 plot_yearly_movement_vectors(cluster_results, artist_name="Taylor Swift",sample_size=0.1)
+
+# %% evolution of music (more than centroids)
+def plot_music_era_heatmap(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Plot a heatmap showing the distribution of music eras across the PCA space
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        grid_size: Number of grid cells in each dimension
+        seed: Random seed for sampling
+    """
+    # Sample and convert to pandas
+    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    
+    # Extract PCA coordinates and years
+    pca_coords = np.vstack(df['features'].values)
+    years = pd.to_datetime(df['release_date']).dt.year.values
+    
+    # Create 2D histogram grid
+    x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
+    y_edges = np.linspace(pca_coords[:,1].min(), pca_coords[:,1].max(), grid_size)
+    
+    # Initialize grid for storing average years
+    year_grid = np.zeros((grid_size-1, grid_size-1))
+    count_grid = np.zeros((grid_size-1, grid_size-1))
+    
+    # Calculate average year for each grid cell
+    for x, y, year in zip(pca_coords[:,0], pca_coords[:,1], years):
+        x_idx = np.digitize(x, x_edges) - 1
+        y_idx = np.digitize(y, y_edges) - 1
+        if 0 <= x_idx < grid_size-1 and 0 <= y_idx < grid_size-1:
+            year_grid[y_idx, x_idx] += year
+            count_grid[y_idx, x_idx] += 1
+    
+    # Calculate average years, handling division by zero
+    mask = count_grid > 0
+    year_grid[mask] = year_grid[mask] / count_grid[mask]
+    year_grid[~mask] = np.nan
+    
+    # Create figure
+    plt.figure(figsize=(12, 10))
+    
+    # Plot heatmap using viridis colormap
+    im = plt.imshow(year_grid, 
+                    extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                    origin='lower',
+                    cmap='viridis',
+                    aspect='auto')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im)
+    cbar.set_label('Average Year')
+    
+    # Customize plot
+    plt.xlabel('First Principal Component')
+    plt.ylabel('Second Principal Component')
+    plt.title('Distribution of Music Eras in PCA Space')
+    plt.grid(False)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_music_era_heatmap(cluster_results, sample_size=0.3, grid_size=30)
+
+# %% plot music feature trends
+def plot_music_trends(cluster_data, sample_size=0.1, seed=42, window_size=3):
+    """
+    Plot trends of different musical features over time using smoothed curves in separate facets
+    
+    Args:
+        cluster_data: Clustered data containing musical features
+        sample_size: Fraction of data to sample (default: 0.1)
+        seed: Random seed for sampling (default: 42)
+        window_size: Size of rolling window for smoothing (default: 3)
+    """
+    # Sample and prepare data
+    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    
+    # Features to analyze
+    features = ['danceability', 'energy', 'valence', 'acousticness', 
+                'instrumentalness', 'speechiness', 'tempo', 'loudness', 'duration_ms','key','mode','time_signature']
+    
+    # Calculate yearly averages, se and normalize
+    yearly_trends = pd.DataFrame()
+    yearly_ses = pd.DataFrame()
+    for feature in features:
+        # Get feature values from raw_features array based on original order
+        feature_idx = feature_cols.index(feature)
+        df[feature] = df['raw_features'].apply(lambda x: x[feature_idx])
+        
+        # Calculate yearly means and standard errors
+        yearly_stats = df.groupby('year')[feature].agg(['mean', 'std', 'count'])
+        yearly_mean = yearly_stats['mean']
+        yearly_se = yearly_stats['std'] / np.sqrt(yearly_stats['count'])
+        
+        # Normalize to 0-1 scale
+        mean_min, mean_max = yearly_mean.min(), yearly_mean.max()
+        yearly_normalized = (yearly_mean - mean_min) / (mean_max - mean_min)
+        yearly_se_normalized = yearly_se / (mean_max - mean_min)
+        
+        # Apply smoothing using rolling average
+        yearly_trends[feature] = yearly_normalized.rolling(window=window_size, center=True).mean()
+        yearly_ses[feature] = yearly_se_normalized.rolling(window=window_size, center=True).mean()
+
+    # Create subplots grid
+    n_rows = 4
+    n_cols = 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 20))
+    axes = axes.flatten()
+    
+    # Plot each feature in its own subplot
+    for i, feature in enumerate(features):
+        ax = axes[i]
+        
+        # Plot mean line
+        ax.plot(yearly_trends.index, yearly_trends[feature], 
+                color='blue',
+                linewidth=2,
+                label='Mean')
+        
+        # Add confidence interval
+        ax.fill_between(yearly_trends.index,
+                       yearly_trends[feature] - yearly_ses[feature],
+                       yearly_trends[feature] + yearly_ses[feature],
+                       color='blue',
+                       alpha=0.2,
+                       label='±1 SE')
+        
+        ax.set_xlabel('Year')
+        ax.set_ylabel('Normalized Score')
+        ax.set_title(feature.capitalize())
+        ax.set_ylim(0, 1)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Rotate x-axis labels for better readability
+        ax.tick_params(axis='x', rotation=45)
+    
+    # Remove any empty subplots
+    for j in range(i+1, len(axes)):
+        fig.delaxes(axes[j])
+    
+    plt.suptitle('Musical Feature Trends Over Time', y=1.02, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_music_trends(cluster_results, sample_size=0.1, window_size=14)
+
+# %%
+def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=42):
+    """
+    Perform time series analysis on musical features by year using Facebook Prophet
+    
+    Args:
+        cluster_data: Clustered data containing musical features
+        sample_size: Fraction of data to sample (default: 0.1) 
+        seed: Random seed for sampling (default: 42)
+    """
+    from prophet import Prophet
+    
+    # Sample and prepare data
+    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    
+    # Features to analyze
+    features = ['danceability', 'energy', 'valence', 'acousticness', 
+                'instrumentalness', 'speechiness', 'tempo', 'loudness', 'duration_ms','key','mode','time_signature']
+    
+    # Create figure for subplots
+    n_rows = 4
+    n_cols = 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 25))
+    axes = axes.flatten()
+    # Analyze each feature
+    for i, feature in enumerate(features):
+        # Get feature values
+        feature_idx = feature_cols.index(feature)
+        df[feature] = df['raw_features'].apply(lambda x: x[feature_idx])
+        
+        # Calculate yearly means
+        yearly_means = df.groupby('year')[feature].mean().reset_index()
+        
+        # Normalize the feature values to 0-1 scale
+        min_val = yearly_means[feature].min()
+        max_val = yearly_means[feature].max()
+        yearly_means[feature] = (yearly_means[feature] - min_val) / (max_val - min_val)
+        
+        # Prepare data for Prophet
+        prophet_df = pd.DataFrame({
+            'ds': pd.to_datetime(yearly_means['year'].astype(str)),
+            'y': yearly_means[feature]
+        })
+        
+        # Create and fit Prophet model with changepoint at 1950
+        changepoints_list = ['1950-01-01']
+        model = Prophet(yearly_seasonality=False, 
+                       weekly_seasonality=False, 
+                       daily_seasonality=False,
+                       changepoint_prior_scale=0.05,
+                       changepoints=changepoints_list)
+        model.fit(prophet_df)
+        
+        # Make future predictions
+        future = model.make_future_dataframe(periods=10, freq='Y')
+        forecast = model.predict(future)
+        
+        # Extract trend components
+        trend = forecast['trend']
+        trend_change = trend.diff().mean()  # Average trend change
+        
+        # Calculate trend acceleration
+        trend_acceleration = trend.diff().diff().mean()
+        
+        # Get overall growth rate
+        total_growth = (trend.iloc[-1] - trend.iloc[0]) / trend.iloc[0]
+        
+        # Print time series components analysis
+        print(f"\nTime Series Analysis for {feature}:")
+        print(f"Average Trend Change: {trend_change:.4f}")
+        print(f"Trend Acceleration: {trend_acceleration:.4f}")
+        print(f"Total Growth Rate: {total_growth:.2%}")
+        
+        # Plot results
+        ax = axes[i]
+        
+        # Plot actual values
+        ax.scatter(prophet_df['ds'], prophet_df['y'], 
+                  color='blue', alpha=0.6, label='Actual')
+        
+        # Plot predicted values and confidence interval
+        ax.plot(forecast['ds'], forecast['yhat'], 
+                color='red', label='Predicted')
+        ax.fill_between(forecast['ds'],
+                       forecast['yhat_lower'],
+                       forecast['yhat_upper'],
+                       color='red', alpha=0.2,
+                       label='Confidence Interval')
+        
+        # Add vertical line for changepoints
+        for changepoint in model.changepoints:
+            ax.axvline(x=changepoint, color='green', linestyle='--', alpha=0.5, label=changepoint)
+        
+        # Add trend analysis text
+        ax.text(0.02, 0.98, 
+                f'Trend Change: {trend_change:.2e}\nAccel: {trend_acceleration:.2e}',
+                transform=ax.transAxes,
+                verticalalignment='top',
+                bbox=dict(facecolor='white', alpha=0.8))
+        
+        ax.set_xlabel('Year')
+        ax.set_ylabel(f'Normalized {feature.capitalize()}')
+        ax.set_title(f'{feature.capitalize()} Trend Analysis')
+        ax.set_ylim(0, 1)  # Set y-axis limits to 0-1
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Rotate x-axis labels
+        ax.tick_params(axis='x', rotation=45)
+    
+    # Remove any empty subplots
+    for j in range(i+1, len(axes)):
+        fig.delaxes(axes[j])
+    
+    plt.suptitle('Time Series Analysis of Musical Features Using Prophet', 
+                 y=1.02, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+analyze_feature_trends_prophet(cluster_results, sample_size=0.5)
 
 # %%
