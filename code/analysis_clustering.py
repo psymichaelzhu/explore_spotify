@@ -54,7 +54,7 @@ df.columns
 feature_cols = [
     #'explicit',
     #'liveness',
-    #'duration_ms',
+    'duration_ms',
     'loudness',
     'key',
     'tempo', 
@@ -63,9 +63,9 @@ feature_cols = [
     'acousticness', 
     'instrumentalness',  
     'speechiness',
-    #'danceability', 
-    #'energy',
-    #'valence'
+    'danceability', 
+    'energy',
+    'valence'
     ]
 
 # select feature columns and numeric data as floats
@@ -700,12 +700,14 @@ def plot_distance_distribution(cluster_data, artist_name=None, sample_size=0.1, 
             # Calculate distances to current centroid
             current_distances = np.sqrt(
                 np.sum((current_points - current_centroid) ** 2, axis=1)
+            )
             current_distances_by_year[year] = current_distances
             
             # Calculate distances to historical centroid if available
             if historical_centroid is not None:
                 historical_distances = np.sqrt(
                     np.sum((current_points - historical_centroid) ** 2, axis=1)
+                )
                 historical_distances_by_year[year] = historical_distances
             
             # Update historical centroid (cumulative mean)
@@ -797,6 +799,12 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
     # Extract data
     num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
     
+    # Filter data for 1920-2020
+    cluster_data = cluster_data[
+        (cluster_data['year'] >= 1920) & 
+        (cluster_data['year'] <= 2020)
+    ]
+    
     # Process data year by year
     years = sorted(cluster_data['year'].unique())
     historical_centroid = None
@@ -818,6 +826,7 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
                     # Calculate distances to historical centroid
                     distances = np.sqrt(
                         np.sum((current_points - historical_centroid) ** 2, axis=1)
+                    )
                     innovation_by_year[year].extend(distances)
                 
                 # Update historical centroid
@@ -835,6 +844,7 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
                 # Calculate distances to current year's centroid
                 distances = np.sqrt(
                     np.sum((current_points - current_centroid) ** 2, axis=1)
+                )
                 innovation_by_year[year].extend(distances)
     
     # Create figure
@@ -1012,55 +1022,7 @@ plot_innovation_ratio_over_time(cluster_results, threshold=2.0,
 
 
 
-#%%
-#绘制results_df
-# Plot results by innovation level over years
-plt.figure(figsize=(12, 6))
-
-# Get innovation level columns (excluding raw_innovation_values)
-level_columns = [col for col in results_df.columns if col != 'raw_innovation_values']
-
-# Plot stacked bars for each level
-bottom = np.zeros(len(results_df))
-colors = plt.cm.viridis(np.linspace(0, 1, len(level_columns)))
-
-for col, color in zip(level_columns, colors):
-    plt.bar(results_df.index, results_df[col], bottom=bottom, 
-            label=f'Innovation {col}', color=color)
-    bottom += results_df[col]
-
-plt.xlabel('Year')
-plt.ylabel('Number of Songs')
-plt.title('Distribution of Innovation Levels by Year')
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tick_params(axis='x', rotation=45)
-plt.tight_layout()
-plt.show()
-
-# %%
-
-from prophet import Prophet
-
-# 格式化数据为 Prophet 格式
-df_prophet = results_df.reset_index()
-df_prophet = df_prophet.rename(columns={"Year": "ds", "0.0–1.0": "y"})
-
-# 定义 Prophet 模型
-model = Prophet()
-model.fit(df_prophet)
-
-# 预测未来 10 年
-future = model.make_future_dataframe(periods=10, freq='Y')
-forecast = model.predict(future)
-
-# 可视化预测结果
-model.plot(forecast)
-plt.title("Prophet Forecast")
-plt.show()
-
-
-# %%
+# %% evolution of centroids
 def plot_centroid_evolution(cluster_data, artist_name=None, sample_size=0.1, seed=None):
     """
     Plot the evolution of centroids in PCA space over years
@@ -1121,173 +1083,12 @@ def plot_centroid_evolution(cluster_data, artist_name=None, sample_size=0.1, see
 # Example usage
 plot_centroid_evolution(cluster_results, sample_size=0.1)
 
-# %%
-def plot_centroid_evolution(cluster_data, artist_name=None, sample_size=0.1, seed=None):
-    """
-    Plot the evolution of music style centroids over years with animation effect
-    
-    Args:
-        cluster_data: DataFrame with cluster predictions and features
-        artist_name: Optional artist name to filter data
-        sample_size: Fraction of data to sample
-        seed: Random seed for sampling
-    """
-    import matplotlib.animation as animation
-    
-    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
-    
-    # Process data year by year
-    years = sorted(cluster_data['year'].unique())
-    centroids = []
-    
-    # Calculate centroid for each year
-    for year in years:
-        year_data = cluster_data[cluster_data['year'] == year]
-        if not year_data.empty:
-            current_points = np.array([
-                [float(features[0]), float(features[1])] 
-                for features in year_data['features']
-            ])
-            current_centroid = current_points.mean(axis=0)
-            centroids.append((year, current_centroid))
-    
-    # Create figure
-    fig = plt.figure(figsize=(12, 8))
-    
-    # Create color gradient based on years
-    num_years = len(centroids)
-    colors = plt.cm.viridis(np.linspace(0, 1, num_years))
-    
-    # Create animation frames
-    frames = []
-    
-    # Plot centroids with animation effect
-    for i, (year, centroid) in enumerate(centroids):
-        # Create new frame
-        plt.clf()
-        
-        # Plot historical centroids with low alpha
-        for j in range(i):
-            prev_year, prev_centroid = centroids[j]
-            plt.scatter(prev_centroid[0], prev_centroid[1], 
-                       c=[colors[j]], s=100, alpha=0.2)
-            plt.annotate(str(prev_year), (prev_centroid[0], prev_centroid[1]), 
-                        xytext=(5, 5), textcoords='offset points', alpha=0.2)
-        
-        # Plot current centroid with full alpha
-        plt.scatter(centroid[0], centroid[1], c=[colors[i]], s=100, alpha=0.8)
-        plt.annotate(str(year), (centroid[0], centroid[1]), 
-                    xytext=(5, 5), textcoords='offset points')
-        
-        # Draw line connecting to previous centroid if exists
-        if i > 0:
-            prev_centroid = centroids[i-1][1]
-            plt.plot([prev_centroid[0], centroid[0]], 
-                    [prev_centroid[1], centroid[1]], 
-                    color=colors[i], alpha=0.5)
-        
-        plt.xlabel('First Principal Component')
-        plt.ylabel('Second Principal Component')
-        title = "Evolution of Music Style Centroids Over Years"
-        if artist_name:
-            title = f"{artist_name}: {title}"
-        plt.title(title)
-        plt.grid(True, alpha=0.3)
-        
-        # Add colorbar to show year progression
-        sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis, 
-                                  norm=plt.Normalize(vmin=min(years), vmax=max(years)))
-        plt.colorbar(sm, label='Year')
-        
-        plt.tight_layout()
-        
-        # Save frame
-        frames.append([plt.gca()])
-    
-    # Save animation
-    anim = animation.ArtistAnimation(fig, frames, interval=500, blit=True)
-    if artist_name:
-        filename = f"centroid_evolution_{artist_name}.gif"
-    else:
-        filename = "centroid_evolution.gif"
-    anim.save(filename, writer='pillow')
-    plt.close()
 
-# Example usage
-#plot_centroid_evolution(cluster_results, sample_size=0.1)
 
-# %%
-def plot_centroid_movement(cluster_data, artist_name=None, sample_size=0.1, seed=None):
+# %% plot yearly movement vectors
+def plot_yearly_movement_vectors(cluster_data, artist_name=None, sample_size=0.1, seed=None):
     """
-    Plot the distance between consecutive year centroids over time
-    
-    Args:
-        cluster_data: DataFrame with cluster predictions and features
-        artist_name: Optional artist name to filter data
-        sample_size: Fraction of data to sample
-        seed: Random seed for sampling
-    """
-    # Extract data
-    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
-    
-    # Process data year by year
-    years = sorted(cluster_data['year'].unique())
-    centroids = []
-    
-    # Calculate centroid for each year
-    for year in years:
-        year_data = cluster_data[cluster_data['year'] == year]
-        if not year_data.empty:
-            current_points = np.array([
-                [float(features[0]), float(features[1])] 
-                for features in year_data['features']
-            ])
-            current_centroid = current_points.mean(axis=0)
-            centroids.append((year, current_centroid))
-    
-    # Calculate distances between consecutive centroids
-    distances = []
-    movement_years = []
-    
-    for i in range(1, len(centroids)):
-        prev_year, prev_centroid = centroids[i-1]
-        curr_year, curr_centroid = centroids[i]
-        
-        distance = np.sqrt(np.sum((curr_centroid - prev_centroid) ** 2))
-        distances.append(distance)
-        movement_years.append(curr_year)
-    
-    # Create plot
-    plt.figure(figsize=(12, 6))
-    plt.plot(movement_years, distances, '-o', linewidth=2, markersize=6)
-    
-    plt.xlabel('Year')
-    plt.ylabel('Distance Between Consecutive Centroids')
-    title = "Movement of Music Style Between Years"
-    if artist_name:
-        title = f"{artist_name}: {title}"
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.tick_params(axis='x', rotation=45)
-    
-    # Add mean distance line
-    mean_distance = np.mean(distances)
-    plt.axhline(y=mean_distance, color='r', linestyle='--', 
-                label=f'Mean Distance: {mean_distance:.3f}')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.show()
-    
-    return movement_years, distances
-
-# Example usage
-plot_centroid_movement(cluster_results, sample_size=0.1)
-
-# %%
-def plot_movement_projection(cluster_data, artist_name=None, sample_size=0.1, seed=None):
-    """
-    Plot the projection of yearly movement vectors onto the overall movement direction
+    Plot yearly movement vectors with tails at origin to compare directions and magnitudes
     
     Args:
         cluster_data: DataFrame with cluster predictions and features
@@ -1312,14 +1113,8 @@ def plot_movement_projection(cluster_data, artist_name=None, sample_size=0.1, se
             current_centroid = current_points.mean(axis=0)
             centroids.append((year, current_centroid))
     
-    # Calculate overall movement vector (from first to last centroid)
-    first_year, first_centroid = centroids[0]
-    last_year, last_centroid = centroids[-1]
-    overall_vector = last_centroid - first_centroid
-    overall_direction = overall_vector / np.linalg.norm(overall_vector)
-    
-    # Calculate yearly movements and their projections
-    projections = []
+    # Calculate yearly movement vectors
+    movement_vectors = []
     movement_years = []
     
     for i in range(1, len(centroids)):
@@ -1328,109 +1123,53 @@ def plot_movement_projection(cluster_data, artist_name=None, sample_size=0.1, se
         
         # Calculate yearly movement vector
         yearly_vector = curr_centroid - prev_centroid
-        
-        # Calculate projection onto overall direction
-        projection = np.dot(yearly_vector, overall_direction)
-        projections.append(projection)
+        movement_vectors.append(yearly_vector)
         movement_years.append(curr_year)
     
-    # Create plot
-    plt.figure(figsize=(12, 6))
+    # Create figure
+    plt.figure(figsize=(12, 12))
     
-    # Plot projections
-    plt.bar(movement_years, projections)
+    # Create color gradient based on years
+    num_years = len(movement_years)
+    colors = plt.cm.viridis(np.linspace(0, 1, num_years))
     
-    plt.xlabel('Year')
-    plt.ylabel('Projection Magnitude')
-    title = "Contribution to Overall Music Style Movement"
+    # Plot movement vectors from origin
+    for i, vector in enumerate(movement_vectors):
+        plt.quiver(0, 0, vector[0], vector[1], 
+                  angles='xy', scale_units='xy', scale=1,
+                  color=colors[i], alpha=0.7)
+        # Add year label at vector tip
+        plt.annotate(str(movement_years[i]), 
+                    (vector[0], vector[1]),
+                    xytext=(5, 5), textcoords='offset points')
+    
+    # Add colorbar to show year progression
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis, 
+                              norm=plt.Normalize(vmin=min(movement_years), 
+                                               vmax=max(movement_years)))
+    plt.colorbar(sm, label='Year')
+    
+    plt.xlabel('First Principal Component Change')
+    plt.ylabel('Second Principal Component Change')
+    title = "Yearly Movement Vectors in Music Style Space"
     if artist_name:
         title = f"{artist_name}: {title}"
     plt.title(title)
-    
-    # Add zero line
-    plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
-    
-    # Add annotations
-    plt.text(0.02, 0.98, 
-            f'Positive values: Movement in overall direction\nNegative values: Movement against overall direction',
-            transform=plt.gca().transAxes,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
     plt.grid(True, alpha=0.3)
-    plt.tick_params(axis='x', rotation=45)
+    plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    plt.axvline(x=0, color='k', linestyle='-', alpha=0.3)
+    
+    # Make plot square and centered on origin
+    max_range = max(abs(plt.xlim()[0]), abs(plt.xlim()[1]),
+                   abs(plt.ylim()[0]), abs(plt.ylim()[1]))
+    plt.xlim(-0.3, 0.3)
+    plt.ylim(-0.3, 0.3)
     
     plt.tight_layout()
     plt.show()
-    
-    return movement_years, projections
 
 # Example usage
-plot_movement_projection(cluster_results, sample_size=0.1)
-
-# %%
-def analyze_pca_composition(features, feature_cols, k=None, threshold=0.9):
-    """
-    Analyze PCA components composition and their relationship with original features using Spark ML
-    
-    Args:
-        features: Spark DataFrame with feature vectors
-        feature_cols: List of original feature column names
-        k: Optional fixed number of components
-        threshold: Variance threshold for automatic component selection if k is None
-        
-    Returns:
-        components_df: DataFrame showing composition of PCA components
-    """
-    # Get number of features
-    n_features = features.first()["features"].size
-    
-    # Fit PCA model using Spark ML
-    pca_spark = PCA(k=n_features, inputCol="features", outputCol="pcaFeatures")
-    model_spark = pca_spark.fit(features)
-    
-    # Get components
-    pc_matrix = model_spark.pc.toArray()  # Get principal components matrix
-    
-    # Use provided k or default to 2
-    optimal_n = k if k is not None else 2
-    
-    # Create DataFrame with component compositions
-    components_df = pd.DataFrame(
-        pc_matrix[:, :optimal_n],
-        columns=[f'PC{i+1}' for i in range(optimal_n)],
-        index=feature_cols
-    )
-    
-    # Plot component composition heatmap
-    plt.figure(figsize=(6, 8))
-    im = plt.imshow(components_df, cmap='RdBu', aspect='auto')
-    plt.colorbar(im, label='Coefficient Value')
-    
-    # Add annotations
-    for i in range(len(components_df.index)):
-        for j in range(len(components_df.columns)):
-            text = plt.text(j, i, f'{components_df.iloc[i, j]:.2f}',
-                          ha="center", va="center", color="black")
-    
-    # Set ticks and labels
-    plt.xticks(range(len(components_df.columns)), components_df.columns)
-    plt.yticks(range(len(components_df.index)), components_df.index)
-    
-    plt.title('PCA Components Composition')
-    plt.xlabel('Principal Components')
-    plt.ylabel('Original Features')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    return components_df
-
-# Example usage:
-components_df = analyze_pca_composition(
-    features, 
-    feature_cols,
-    k=2
-)
-
+plot_yearly_movement_vectors(cluster_results, sample_size=0.1)
+#%%
+plot_yearly_movement_vectors(cluster_results, artist_name="Tayplor Swift",sample_size=0.1)
 # %%
