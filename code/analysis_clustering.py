@@ -89,7 +89,7 @@ features.persist()
 features.printSchema()
 
 
-# %% K-means
+# %% K-means and PCA visualization functions
 # try different numbers of clusters to find optimal k
 def find_optimal_kmeans(features, k_values=range(3, 5)):
     """
@@ -149,6 +149,49 @@ def find_optimal_kmeans(features, k_values=range(3, 5)):
     optimal_predictions = kmeans_model.transform(features)
     
     return optimal_k, optimal_predictions, silhouettes
+
+def analyze_pca_composition(model_pca, feature_cols):
+    """
+    Analyze and visualize the composition of a trained PCA model using heatmap
+    
+    Args:
+        model_pca: Trained PCA model
+        feature_cols: List of original feature names
+    """
+    # Get principal components matrix
+    pc_matrix = model_pca.pc.toArray()
+    n_components = pc_matrix.shape[1]
+    
+    # Create DataFrame with component compositions
+    components_df = pd.DataFrame(
+        pc_matrix,
+        columns=[f'PC{i}' for i in range(n_components)],
+        index=feature_cols
+    )
+    
+    # Plot heatmap
+    plt.figure(figsize=(6, 8))
+    im = plt.imshow(components_df, cmap='RdBu', aspect='auto')
+    plt.colorbar(im, label='Component Weight')
+    
+    # Add value annotations
+    for i in range(len(feature_cols)):
+        for j in range(n_components):
+            plt.text(j, i, f'{components_df.iloc[i, j]:.2f}',
+                    ha='center', va='center')
+    
+    # Customize plot
+    plt.xticks(range(n_components), components_df.columns)
+    plt.yticks(range(len(feature_cols)), feature_cols)
+    plt.title('PCA Components Composition')
+    plt.xlabel('Principal Components')
+    plt.ylabel('Original Features')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return components_df
+
 
 # %% PCA-KMeans
 def find_optimal_pca_components(features,threshold=0.9,k=None):
@@ -219,12 +262,14 @@ def find_optimal_pca_components(features,threshold=0.9,k=None):
     pca_features = pca_results.rdd.map(lambda row: Vectors.dense(row.pcaFeatures))
     pca_features = spark.createDataFrame(pca_features.map(Row), ["features"])
 
-    return optimal_n, pca_features, explained_variances, cumulative_variance
+    return optimal_n, pca_features, explained_variances, cumulative_variance, model
 # 1. PCA: find optimal number of components
-optimal_n, features_pca, explained_variances, cumulative_variance = find_optimal_pca_components(features,k=2)
+optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features,k=2)
+components_df = analyze_pca_composition(model_pca, feature_cols)
 # 2. KMeans: find optimal k, based on PCA-transformed features
 features_pca.persist()
 optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca)
+
 
 #%% merge cluster results
 # merge to get cluster results
@@ -1159,17 +1204,15 @@ def plot_yearly_movement_vectors(cluster_data, artist_name=None, sample_size=0.1
     plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
     plt.axvline(x=0, color='k', linestyle='-', alpha=0.3)
     
-    # Make plot square and centered on origin
-    max_range = max(abs(plt.xlim()[0]), abs(plt.xlim()[1]),
-                   abs(plt.ylim()[0]), abs(plt.ylim()[1]))
-    plt.xlim(-0.3, 0.3)
-    plt.ylim(-0.3, 0.3)
+    plt.xlim(-0.5, 0.5)
+    plt.ylim(-0.5, 0.5)
     
     plt.tight_layout()
     plt.show()
 
 # Example usage
 plot_yearly_movement_vectors(cluster_results, sample_size=0.1)
-#%%
-plot_yearly_movement_vectors(cluster_results, artist_name="Tayplor Swift",sample_size=0.1)
+
+plot_yearly_movement_vectors(cluster_results, artist_name="Taylor Swift",sample_size=0.1)
+
 # %%
