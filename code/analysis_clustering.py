@@ -945,6 +945,7 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
     
     return results_df
 
+'''
 # 使用历史距离
 results_df = plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.1,bins=[0,1,1.5,2,2.5,100])
 plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.1,bins=[0,2,100])
@@ -953,7 +954,7 @@ plot_innovation_levels_over_time(cluster_results, distance_type='historical',sam
 plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.3,bins=[0,1,1.5,2,2.5,100])
 plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.3,bins=[0,2,100])
 
-
+'''
 
 
 
@@ -1339,7 +1340,8 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
         model.add_seasonality(
             name='long_cycle',
             period=cycle_years * 365.25,
-            fourier_order=3
+            fourier_order=3,
+            prior_scale=0.1
         )
         
         # Add regressors for intercept and slope changes
@@ -1411,24 +1413,22 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
 # Example usage:
 prophet_results = time_series_analysis(
     cluster_results, 
-    distance_type='internal',#historical, internal
+    distance_type='historical',#historical, internal
     sample_size=0.1,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
     cycle_years=40,#40
     holidays=['1966-01-01', '1993-01-01'],
-    events=[1999]
+    events=[2000]
 )
 
 #2个标准差外的
 # %%
-#自动：不同参数：长周期；傅立叶阶数
+#自动：不同参数：长周期；傅立叶阶数；强度
 #检验
-
-#更大比例；不同距离；seed
-
 #拼图
 
+#更大比例；不同距离；seed
 
 
 
