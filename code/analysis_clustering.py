@@ -746,13 +746,13 @@ def plot_distance_distribution(cluster_data, artist_name=None, sample_size=0.1, 
             
             # Calculate distances to current centroid
             current_distances = np.sqrt(
-                np.sum((current_points - current_centroid) ** 2, axis=1)
+                np.sum((current_points - current_centroid) ** 2, axis=1))
             current_distances_by_year[year] = current_distances
             
             # Calculate distances to historical centroid if available
             if historical_centroid is not None:
                 historical_distances = np.sqrt(
-                    np.sum((current_points - historical_centroid) ** 2, axis=1)
+                    np.sum((current_points - historical_centroid) ** 2, axis=1))
                 historical_distances_by_year[year] = historical_distances
             
             # Update historical centroid (cumulative mean)
@@ -870,7 +870,7 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
                 if historical_centroid is not None:
                     # Calculate distances to historical centroid
                     distances = np.sqrt(
-                        np.sum((current_points - historical_centroid) ** 2, axis=1)
+                        np.sum((current_points - historical_centroid) ** 2, axis=1))
                     innovation_by_year[year].extend(distances)
                 
                 # Update historical centroid
@@ -887,7 +887,7 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
             else:  # internal distance
                 # Calculate distances to current year's centroid
                 distances = np.sqrt(
-                    np.sum((current_points - current_centroid) ** 2, axis=1)
+                    np.sum((current_points - current_centroid) ** 2, axis=1))
                 innovation_by_year[year].extend(distances)
     
     # Create figure
