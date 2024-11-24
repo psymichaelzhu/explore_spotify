@@ -19,8 +19,9 @@ spark = SparkSession \
         .appName("preprocess_eda") \
         .getOrCreate()
 
+df_raw = spark.read.csv('/home/mikezhu/music/data/60W/tracks.csv', header=True)
 
-#%%
+#%% examine dataset by artist and id
 def examine_dataset(df,representative_check=True):
     print("number of observations:",df.count())
     df.printSchema()
@@ -30,8 +31,37 @@ def examine_dataset(df,representative_check=True):
         df.filter(F.col("artists").contains("Oasis")).show(truncate=False)
         df.filter(F.col("artists").contains("Coldplay")).show(truncate=False)
 
-df_raw = spark.read.csv('/home/mikezhu/music/data/60W/tracks.csv', header=True)
+
 examine_dataset(df_raw) 
+
+
+
+
+# %% Check the data type of release_date column
+print("\nRelease Date Column Data Type:")
+print(df_raw.select('release_date').dtypes)
+
+# Show a few example release dates
+print("\nSample Release Dates:")
+df_raw.select('release_date').show(5)
+
+
+# Count how many release dates are January 1st
+jan_first_count = df_raw.filter(F.date_format('release_date', 'MM-dd') == '01-01').count()
+total_count = df_raw.count()
+
+print(f"\nRelease Date Analysis:")
+print(f"Number of songs released on January 1st: {jan_first_count}")
+print(f"Total number of songs: {total_count}")
+print(f"Percentage of January 1st releases: {(jan_first_count/total_count)*100:.2f}%")
+
+# Count songs where release_date length is 4 (YYYY format)
+year_format_count = df_raw.filter(F.length('release_date') == 4).count()
+
+print("\nYear Format (YYYY) Analysis:")
+print(f"Number of songs with 4-digit release date: {year_format_count}")
+print(f"Total number of songs: {total_count}")
+print(f"Percentage of 4-digit release dates: {(year_format_count/total_count)*100:.2f}%")
 
 
 #%%

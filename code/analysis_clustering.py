@@ -747,14 +747,12 @@ def plot_distance_distribution(cluster_data, artist_name=None, sample_size=0.1, 
             # Calculate distances to current centroid
             current_distances = np.sqrt(
                 np.sum((current_points - current_centroid) ** 2, axis=1)
-            )
             current_distances_by_year[year] = current_distances
             
             # Calculate distances to historical centroid if available
             if historical_centroid is not None:
                 historical_distances = np.sqrt(
                     np.sum((current_points - historical_centroid) ** 2, axis=1)
-                )
                 historical_distances_by_year[year] = historical_distances
             
             # Update historical centroid (cumulative mean)
@@ -945,9 +943,10 @@ def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size
 results_df = plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.1,bins=[0,1,1.5,2,2.5,100])
 plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.1,bins=[0,2,100])
 
-# 使用年内距离
+# 使用年距离
 plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.3,bins=[0,1,1.5,2,2.5,100])
 plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.3,bins=[0,2,100])
+
 
 
 # %% proportion of highly innovative songs over time
@@ -1499,112 +1498,588 @@ def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=None):
 # Example usage
 analyze_feature_trends_prophet(cluster_results, sample_size=0.1)
 
+
 # %%
-def analyze_yearly_song_counts(df, intervals=[(1950,1980), (1980,2000), (2000,2020)], sample_frac=0.1):
+def analyze_innovation_seasonality(cluster_data, artist_name=None, sample_size=0.1, seed=None,
+                                 bins=[0, 1, 2, 3, 4], distance_type='historical',
+                                 forecast_years=10, cycle_years=40, holidays=None, changepoints=None):
     """
-    Analyze yearly song count trends for different time intervals using Prophet
+    Analyze innovation levels using Prophet with holidays and changepoints
     
     Args:
-        df: Spark DataFrame with song data
-        intervals: List of (start_year, end_year) tuples defining time periods
-        sample_frac: Fraction of data to sample
+        cluster_data: DataFrame with cluster predictions and features
+        artist_name: Optional artist name to filter data
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+        bins: Innovation level ranges
+        distance_type: Type of distance to calculate ('historical' or 'internal')
+        forecast_years: Number of years to forecast
+        cycle_years: Length of cycle in years
+        changepoints: List of dates for changepoints
     """
+    from prophet import Prophet
     
-    # Sample data
-    df_sample = df.sample(withReplacement=False, fraction=sample_frac)
+    # Get innovation data using existing function
+    results_df = plot_innovation_levels_over_time(cluster_data, artist_name, sample_size, 
+                                                seed, bins, distance_type)
     
-    # Convert to pandas and extract year from release_date
-    pdf = df_sample.toPandas()
-    pdf['year'] = pd.to_datetime(pdf['release_date']).dt.year
+    # Save the time series data
+    filename = f'innovation_timeseries_{distance_type}.csv'
+    if artist_name:
+        filename = f'innovation_timeseries_{artist_name}_{distance_type}.csv'
+    results_df.to_csv(filename)
     
-    # Count songs per year
-    yearly_counts = pdf.groupby('year').size().reset_index()
-    yearly_counts.columns = ['year', 'count']
+    # Define holidays
+    holidays = pd.DataFrame({
+        'holiday': 'innovation_peak',
+        'ds': pd.to_datetime(holidays),
+        'lower_window': -30,
+        'upper_window': 30,
+    })
+    
+    prophet_results = {}
+    bin_ranges = [f"{bins[i]:.1f}-{bins[i+1]:.1f}" for i in range(len(bins)-1)]
+    
+    for range_name in bin_ranges:
+        # Prepare DataFrame for Prophet
+        df = pd.DataFrame({
+            'ds': pd.to_datetime(results_df.index.astype(str) + '-01-01'),
+            'y': results_df[range_name]
+        })
+        
+        # Add streaming regressor for years after 1999
+        df['streaming1'] = (df['ds'] >= '1999-01-01').astype(int)
+        df['streaming2'] = (df['ds'] >= '2015-01-01').astype(int)
+        
+        # Add continuous year encoding after 1999 and 2015
+        df['streaming1_years'] = 0
+        df['streaming2_years'] = 0
+        df.loc[df['ds'] >= '1999-01-01', 'streaming1_years'] = (df[df['ds'] >= '1999-01-01']['ds'].dt.year - 1999)
+        df.loc[df['ds'] >= '2015-01-01', 'streaming2_years'] = (df[df['ds'] >= '2015-01-01']['ds'].dt.year - 2015)
+        
+        # Initialize Prophet model
+        model = Prophet(
+            yearly_seasonality=False,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            holidays=holidays,
+            seasonality_mode='additive',
+            changepoint_prior_scale=0.1,
+            holidays_prior_scale=10.0,
+            changepoints=changepoints
+        )
+        
+        # Add custom seasonality for long-term cycles
+        model.add_seasonality(
+            name='long_cycle',
+            period=cycle_years * 365.25,
+            fourier_order=5
+        )
+        
+        # Add streaming regressors including continuous year encoding
+        model.add_regressor('streaming1')
+        model.add_regressor('streaming2')
+        model.add_regressor('streaming1_years')
+        model.add_regressor('streaming2_years')
+        model.fit(df)
+        
+        # Make future predictions
+        future = model.make_future_dataframe(
+            periods=forecast_years,
+            freq='Y',
+            include_history=True
+        )
+        # Add streaming regressors to future dataframe
+        future['streaming1'] = (future['ds'] >= '1999-01-01').astype(int)
+        future['streaming2'] = (future['ds'] >= '2015-01-01').astype(int)
+        future['streaming1_years'] = 0
+        future['streaming2_years'] = 0
+        future.loc[future['ds'] >= '1999-01-01', 'streaming1_years'] = (future[future['ds'] >= '1999-01-01']['ds'].dt.year - 1999)
+        future.loc[future['ds'] >= '2015-01-01', 'streaming2_years'] = (future[future['ds'] >= '2015-01-01']['ds'].dt.year - 2015)
+        
+        forecast = model.predict(future)
+        
+        # Store results
+        prophet_results[range_name] = {
+            'model': model,
+            'forecast': forecast,
+            'actual': df
+        }
+        # Plot components
+        model.plot_components(forecast)
+        plt.suptitle(f'Analysis for Innovation Range {range_name}')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot forecast with changepoints
+        plt.figure(figsize=(12, 6))
+        fig = model.plot(forecast)
+        
+        # Add vertical lines for changepoints
+        ax = fig.gca()
+        for cp in model.changepoints:
+            ax.axvline(x=cp, color='r', alpha=0.2, linestyle='--')
+
+        from prophet.plot import add_changepoints_to_plot
+        a = add_changepoints_to_plot(ax, model, forecast)
+
+        plt.title(f'Innovation Level Forecast for Range {range_name}\nRed dashed lines indicate trend changepoints')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot changepoint effects
+        deltas = model.params['delta'].mean(0)
+        fig = plt.figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+        ax.bar(range(len(deltas)), deltas)
+        ax.set_title('Magnitude of Changepoint Effects')
+        ax.set_xlabel('Changepoint Number')
+        ax.set_ylabel('Effect Size')
+        plt.tight_layout()
+        plt.show()
+    
+    return prophet_results
+
+# Example usage:
+prophet_results = analyze_innovation_seasonality(
+    cluster_results, 
+    distance_type='internal',
+    sample_size=0.3,
+    bins=[2,2.5,100],
+    forecast_years=10,
+    cycle_years=20,
+    seed=42,
+    holidays=['1933-01-01', '1993-01-01']
+)
+
+#%% 可以的
+def analyze_innovation_seasonality(cluster_data, artist_name=None, sample_size=0.1, seed=None,
+                                 bins=[0, 1, 2, 3, 4], distance_type='historical',
+                                 forecast_years=10, cycle_years=40, holidays=None, changepoints=None):
+    """
+    Analyze innovation levels using Prophet with holidays and changepoints
+    
+    Args:
+        cluster_data: DataFrame with cluster predictions and features
+        artist_name: Optional artist name to filter data
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+        bins: Innovation level ranges
+        distance_type: Type of distance to calculate ('historical' or 'internal')
+        forecast_years: Number of years to forecast
+        cycle_years: Length of cycle in years
+        changepoints: List of dates for changepoints
+    """
+    from prophet import Prophet
+    
+    # Get innovation data using existing function
+    results_df = plot_innovation_levels_over_time(cluster_data, artist_name, sample_size, 
+                                                seed, bins, distance_type)
+    
+    # Save the time series data
+    filename = f'innovation_timeseries_{distance_type}.csv'
+    if artist_name:
+        filename = f'innovation_timeseries_{artist_name}_{distance_type}.csv'
+    results_df.to_csv(filename)
+    
+    # Define holidays
+    holidays = pd.DataFrame({
+        'holiday': 'innovation_peak',
+        'ds': pd.to_datetime(holidays),
+        'lower_window': -30,
+        'upper_window': 30,
+    })
+    
+    prophet_results = {}
+    bin_ranges = [f"{bins[i]:.1f}-{bins[i+1]:.1f}" for i in range(len(bins)-1)]
+    
+    for range_name in bin_ranges:
+        # Prepare DataFrame for Prophet
+        df = pd.DataFrame({
+            'ds': pd.to_datetime(results_df.index.astype(str) + '-01-01'),
+            'y': results_df[range_name]
+        })
+        
+        # Add streaming regressor for years after 1999
+        df['streaming1'] = (df['ds'] >= '1999-01-01').astype(int)
+        df['streaming2'] = (df['ds'] >= '2015-01-01').astype(int)
+        # Initialize Prophet model
+        model = Prophet(
+            yearly_seasonality=True,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            holidays=holidays,
+            seasonality_mode='additive',
+            changepoint_prior_scale=0.1,
+            holidays_prior_scale=10.0,
+            changepoints=changepoints
+        )
+        
+        # Add custom seasonality for long-term cycles
+        model.add_seasonality(
+            name='long_cycle',
+            period=cycle_years * 365.25,
+            fourier_order=5
+        )
+        
+        # Add streaming regressor
+        model.add_regressor('streaming1')
+        model.add_regressor('streaming2')
+        model.fit(df)
+        
+        # Make future predictions
+        future = model.make_future_dataframe(
+            periods=forecast_years,
+            freq='Y',
+            include_history=True
+        )
+        # Add streaming regressor to future dataframe
+        future['streaming1'] = (future['ds'] >= '1999-01-01').astype(int)
+        future['streaming2'] = (future['ds'] >= '2015-01-01').astype(int)
+        forecast = model.predict(future)
+        
+        # Store results
+        prophet_results[range_name] = {
+            'model': model,
+            'forecast': forecast,
+            'actual': df
+        }
+        # Plot components
+        model.plot_components(forecast)
+        plt.suptitle(f'Analysis for Innovation Range {range_name}')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot forecast with changepoints
+        plt.figure(figsize=(12, 6))
+        fig = model.plot(forecast)
+        
+        # Add vertical lines for changepoints
+        ax = fig.gca()
+        for cp in model.changepoints:
+            ax.axvline(x=cp, color='r', alpha=0.2, linestyle='--')
+
+        from prophet.plot import add_changepoints_to_plot
+        a = add_changepoints_to_plot(ax, model, forecast)
+
+        plt.title(f'Innovation Level Forecast for Range {range_name}\nRed dashed lines indicate trend changepoints')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot changepoint effects
+        deltas = model.params['delta'].mean(0)
+        fig = plt.figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+        ax.bar(range(len(deltas)), deltas)
+        ax.set_title('Magnitude of Changepoint Effects')
+        ax.set_xlabel('Changepoint Number')
+        ax.set_ylabel('Effect Size')
+        plt.tight_layout()
+        plt.show()
+    
+    return prophet_results
+
+# Example usage:
+prophet_results = analyze_innovation_seasonality(
+    cluster_results, 
+    distance_type='internal',
+    sample_size=0.1,
+    bins=[0,1,1.5,2,2.5,100],
+    forecast_years=10,
+    cycle_years=45,
+    holidays=['1966-01-01', '1993-01-01'],
+    changepoints=['1997-01-01', '1998-01-01', '1999-01-01', '2000-01-01','2001-01-01', '2014-01-01','2015-01-01','2016-01-01','2017-01-01']
+)
+
+#%%
+# %%
+def analyze_innovation_seasonality(cluster_data, artist_name=None, sample_size=0.1, seed=None,
+                                 bins=[0, 1, 2, 3, 4], distance_type='historical',
+                                 forecast_years=10, holidays=None, changepoints=None):
+    """
+    Analyze innovation levels using Prophet with holidays and changepoints
+    
+    Args:
+        cluster_data: DataFrame with cluster predictions and features
+        artist_name: Optional artist name to filter data
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+        bins: Innovation level ranges
+        distance_type: Type of distance to calculate ('historical' or 'internal')
+        forecast_years: Number of years to forecast
+        changepoints: List of dates for changepoints
+    """
+    from prophet import Prophet
+    
+    # Get innovation data using existing function
+    results_df = plot_innovation_levels_over_time(cluster_data, artist_name, sample_size, 
+                                                seed, bins, distance_type)
+    
+    # Save the time series data
+    filename = f'innovation_timeseries_{distance_type}.csv'
+    if artist_name:
+        filename = f'innovation_timeseries_{artist_name}_{distance_type}.csv'
+    results_df.to_csv(filename)
+    
+    # Define holidays
+    holidays = pd.DataFrame({
+        'holiday': 'innovation_peak',
+        'ds': pd.to_datetime(holidays),
+        'lower_window': -30,
+        'upper_window': 30,
+    })
+    
+    prophet_results = {}
+    bin_ranges = [f"{bins[i]:.1f}-{bins[i+1]:.1f}" for i in range(len(bins)-1)]
+    
+    for range_name in bin_ranges:
+        # Prepare DataFrame for Prophet
+        df = pd.DataFrame({
+            'ds': pd.to_datetime(results_df.index.astype(str) + '-01-01'),
+            'y': results_df[range_name]
+        })
+        
+        # Add streaming regressor for years after 1999
+        df['streaming1'] = (df['ds'] >= '1999-01-01').astype(int)
+        df['streaming2'] = (df['ds'] >= '2015-01-01').astype(int)
+        # Initialize Prophet model
+        model = Prophet(
+            yearly_seasonality=False,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            holidays=holidays,
+            changepoint_prior_scale=0.1,
+            holidays_prior_scale=10.0,
+            changepoints=changepoints
+        )
+        
+        # Add streaming regressor
+        model.add_regressor('streaming1')
+        model.add_regressor('streaming2')
+        model.fit(df)
+        
+        # Make future predictions
+        future = model.make_future_dataframe(
+            periods=forecast_years,
+            freq='Y',
+            include_history=True
+        )
+        # Add streaming regressor to future dataframe
+        future['streaming1'] = (future['ds'] >= '1999-01-01').astype(int)
+        future['streaming2'] = (future['ds'] >= '2015-01-01').astype(int)
+        forecast = model.predict(future)
+        
+        # Store results
+        prophet_results[range_name] = {
+            'model': model,
+            'forecast': forecast,
+            'actual': df
+        }
+        # Plot components
+        model.plot_components(forecast)
+        plt.suptitle(f'Analysis for Innovation Range {range_name}')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot forecast with changepoints
+        plt.figure(figsize=(12, 6))
+        fig = model.plot(forecast)
+        
+        # Add vertical lines for changepoints
+        ax = fig.gca()
+        for cp in model.changepoints:
+            ax.axvline(x=cp, color='r', alpha=0.2, linestyle='--')
+
+        from prophet.plot import add_changepoints_to_plot
+        a = add_changepoints_to_plot(ax, model, forecast)
+
+        plt.title(f'Innovation Level Forecast for Range {range_name}\nRed dashed lines indicate trend changepoints')
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot changepoint effects
+        deltas = model.params['delta'].mean(0)
+        fig = plt.figure(figsize=(12, 6))
+        ax = fig.add_subplot(111)
+        ax.bar(range(len(deltas)), deltas)
+        ax.set_title('Magnitude of Changepoint Effects')
+        ax.set_xlabel('Changepoint Number')
+        ax.set_ylabel('Effect Size')
+        plt.tight_layout()
+        plt.show()
+    
+    return prophet_results
+
+# Example usage:
+prophet_results = analyze_innovation_seasonality(
+    cluster_results, 
+    distance_type='internal',
+    sample_size=0.1,
+    bins=[0,1,1.5,2,2.5,100],
+    forecast_years=10,
+    holidays=['1966-01-01', '1993-01-01'],
+    changepoints=['1997-01-01', '1998-01-01', '1999-01-01', '2000-01-01','2001-01-01', '2014-01-01','2015-01-01','2016-01-01','2017-01-01']
+)
+
+
+
+
+
+
+# %% innovation levels over time: release date
+def plot_innovation_levels_over_time(cluster_data, artist_name=None, sample_size=0.1, seed=None, 
+                                   bins=[0, 1, 2, 3, 4], distance_type='historical'):
+    """
+    Plot the number of songs in different innovation level ranges over time and return the data
+    
+    Args:
+        cluster_data: DataFrame with cluster predictions and features
+        artist_name: Optional artist name to filter data
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+        bins: Innovation level ranges (default: [0, 1, 2, 3, 4])
+        distance_type: Type of distance to calculate ('historical' or 'internal')
+        
+    Returns:
+        DataFrame containing innovation counts by date and range
+    """
+    # Extract data
+    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
+    
+    # Convert year to datetime and filter for 1920-2020
+    # Randomly assign dates within each year
+    # Check if release_date only contains year
+    if cluster_data['release_date'].str.len().max() == 4:
+        # If only year, add random day within that year
+        cluster_data['release_date'] = pd.to_datetime(cluster_data['release_date'].astype(str)) + \
+            pd.to_timedelta(np.random.randint(0, 365, size=len(cluster_data)), unit='D')
+    else:
+        # Otherwise just convert to datetime
+        cluster_data['release_date'] = pd.to_datetime(cluster_data['release_date'])
+        
+    cluster_data = cluster_data[
+        (cluster_data['release_date'] >= '1980-01-01') & 
+        (cluster_data['release_date'] <= '1984-12-31')
+    ]
+    
+    # Sort data by release date
+    cluster_data = cluster_data.sort_values('release_date')
+    
+    # Process date by release_date
+    dates = cluster_data['release_date'].unique()
+    historical_centroid = None
+    
+    # Store innovation levels for each date
+    innovation_by_date = {date: [] for date in dates}
+    
+    for date in dates:
+        date_data = cluster_data[cluster_data['release_date'] == date]
+        if not date_data.empty:
+            current_points = np.array([
+                [float(features[0]), float(features[1])] 
+                for features in date_data['features']
+            ])
+            current_centroid = current_points.mean(axis=0)
+            
+            if distance_type == 'historical':
+                if historical_centroid is not None:
+                    # Calculate distances to historical centroid
+                    distances = np.sqrt(
+                        np.sum((current_points - historical_centroid) ** 2, axis=1)
+                    )
+                    innovation_by_date[date].extend(distances)
+                
+                # Update historical centroid
+                if historical_centroid is None:
+                    historical_centroid = current_centroid
+                else:
+                    historical_data = cluster_data[cluster_data['release_date'] <= date]
+                    historical_points = np.array([
+                        [float(features[0]), float(features[1])] 
+                        for features in historical_data['features']
+                    ])
+                    historical_centroid = historical_points.mean(axis=0)
+            
+            else:  # internal distance
+                # Calculate distances to current date's centroid
+                distances = np.sqrt(
+                    np.sum((current_points - current_centroid) ** 2, axis=1)
+                )
+                innovation_by_date[date].extend(distances)
     
     # Create figure
-    n_intervals = len(intervals)
-    fig, axes = plt.subplots(n_intervals, 1, figsize=(12, 5*n_intervals))
-    if n_intervals == 1:
-        axes = [axes]
+    plt.figure(figsize=(12, 6))
     
-    for i, (start_year, end_year) in enumerate(intervals):
-        # Filter data for interval
-        interval_data = yearly_counts[
-            (yearly_counts['year'] >= start_year) & 
-            (yearly_counts['year'] <= end_year)
-        ].copy()  # Add .copy() to avoid SettingWithCopyWarning
-        
-        if len(interval_data) == 0:
-            print(f"No data found for interval {start_year}-{end_year}")
-            continue
-            
-        # Prepare data for Prophet
-        prophet_df = interval_data.rename(columns={'year': 'ds', 'count': 'y'})
-        prophet_df['ds'] = pd.to_datetime(prophet_df['ds'].astype(str))
-        
-        try:
-            # Fit Prophet model
-            model = Prophet(changepoint_prior_scale=0.05,
-                          yearly_seasonality=False)
-            model.fit(prophet_df)
-            
-            # Make future predictions
-            future = model.make_future_dataframe(periods=5, freq='Y')
-            forecast = model.predict(future)
-            
-            # Calculate trend metrics
-            trend_change = (forecast['trend'].iloc[-1] - forecast['trend'].iloc[0]) / len(forecast)
-            trend_acceleration = np.diff(forecast['trend']).mean()
-            
-            # Plot
-            ax = axes[i]
-            
-            # Plot actual counts
-            ax.scatter(prophet_df['ds'], prophet_df['y'], 
-                      color='blue', alpha=0.6, label='Actual')
-            
-            # Plot predictions and confidence interval
-            ax.plot(forecast['ds'], forecast['yhat'], 
-                    color='red', label='Predicted')
-            ax.fill_between(forecast['ds'],
-                           forecast['yhat_lower'],
-                           forecast['yhat_upper'],
-                           color='red', alpha=0.2,
-                           label='Confidence Interval')
-            
-            # Add changepoint lines
-            for changepoint in model.changepoints:
-                ax.axvline(x=changepoint, color='green', linestyle='--', alpha=0.5)
-            
-            # Add trend analysis text
-            ax.text(0.02, 0.98,
-                    f'Period: {start_year}-{end_year}\n'
-                    f'Trend Change: {trend_change:.2f} songs/year\n'
-                    f'Acceleration: {trend_acceleration:.2f} songs/year²',
-                    transform=ax.transAxes,
-                    verticalalignment='top',
-                    bbox=dict(facecolor='white', alpha=0.8))
-            
-            ax.set_xlabel('Year')
-            ax.set_ylabel('Number of Songs')
-            ax.set_title(f'Song Count Trend Analysis ({start_year}-{end_year})')
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            
-            # Rotate x-axis labels
-            ax.tick_params(axis='x', rotation=45)
-            
-        except Exception as e:
-            print(f"Error analyzing interval {start_year}-{end_year}: {str(e)}")
-            continue
+    # Calculate counts for each bin range
+    bin_ranges = list(zip(bins[:-1], bins[1:]))
+    counts_by_range = {f"{low:.1f}-{high:.1f}": [] for low, high in bin_ranges}
     
-    plt.suptitle('Time Series Analysis of Yearly Song Counts Using Prophet',
-                 y=1.02, fontsize=16)
+    for date in dates:
+        date_innovations = innovation_by_date[date]
+        if date_innovations:
+            # Count songs in each range
+            for (low, high) in bin_ranges:
+                count = sum((low <= x < high) for x in date_innovations)
+                counts_by_range[f"{low:.1f}-{high:.1f}"].append(count)
+        else:
+            # Add 0 if no songs on this date
+            for range_key in counts_by_range:
+                counts_by_range[range_key].append(0)
+    
+    # Plot lines for each range
+    colors = plt.cm.viridis(np.linspace(0, 1, len(bin_ranges)))
+    for (range_key, counts), color in zip(counts_by_range.items(), colors):
+        plt.plot(dates, counts, '-', label=f'Innovation {range_key}', 
+                color=color, linewidth=1, alpha=0.8)
+    
+    plt.xlabel('Release Date')
+    plt.ylabel('Number of Songs')
+    title = f"Distribution of {'Historical' if distance_type == 'historical' else 'Internal'} Innovation Levels Over Time"
+    if artist_name:
+        title = f"{artist_name}: {title}"
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tick_params(axis='x', rotation=45)
+    
     plt.tight_layout()
     plt.show()
+    
+    # Create and return DataFrame with results
+    results_df = pd.DataFrame(counts_by_range, index=dates)
+    results_df.index.name = 'Release Date'
+    
+    # Add raw innovation values
+    results_df['raw_innovation_values'] = [innovation_by_date[date] for date in dates]
+    
+    return results_df
 
-# Example usage
-intervals = [(1950,1980), (1980,2000), (2000,2020)]
-analyze_yearly_song_counts(df, intervals=intervals, sample_frac=0.1)
+# 使用历史距离
+'''results_df = plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.01,bins=[0,100])#1,1.5,2,2.5,
+plot_innovation_levels_over_time(cluster_results, distance_type='historical',sample_size=0.01,bins=[0,2,100])
+
+# 使用年距离
+plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.01,bins=[0,100])
+plot_innovation_levels_over_time(cluster_results, distance_type='internal',sample_size=0.01,bins=[0,2,100])'''
+
+
+# %% Check release date distribution: we can't use the release date as a index
+# Count how many release dates are January 1st
+jan_first_count = df.filter(F.date_format('release_date', 'MM-dd') == '01-01').count()
+total_count = df.count()
+
+print(f"\nRelease Date Analysis:")
+print(f"Number of songs released on January 1st: {jan_first_count}")
+print(f"Total number of songs: {total_count}")
+print(f"Percentage of January 1st releases: {(jan_first_count/total_count)*100:.2f}%")
+
+# Count songs where release_date length is 4 (YYYY format)
+year_format_count = df.filter(F.length('release_date') == 4).count()
+
+print("\nYear Format (YYYY) Analysis:")
+print(f"Number of songs with 4-digit release date: {year_format_count}")
+print(f"Total number of songs: {total_count}")
+print(f"Percentage of 4-digit release dates: {(year_format_count/total_count)*100:.2f}%")
 
 # %%
+
