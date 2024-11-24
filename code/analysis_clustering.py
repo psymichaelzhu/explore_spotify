@@ -25,6 +25,8 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
+# 仅仅要release_date在1920-2020的
+#df = df.filter((F.col("release_date").between("1920-01-01", "2020-12-31")))
 print(df.count())
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
@@ -1703,7 +1705,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
 prophet_results = time_series_analysis(
     cluster_results, 
     distance_type='historical',#historical, internal
-    sample_size=0.5,
+    sample_size=0.3,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
     cycle_years=40,#40
@@ -1720,3 +1722,7 @@ prophet_results = time_series_analysis(
 
 #拼图
 
+
+
+
+#1920-2020可以
