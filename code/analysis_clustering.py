@@ -1,5 +1,6 @@
 
 # %% Load data and packages
+
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import SparkSession, Row
 from pyspark.ml.linalg import Vectors
@@ -13,6 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import matplotlib.animation as animation
+from prophet import Prophet
 
 
 spark = SparkSession \
@@ -1281,22 +1283,25 @@ def plot_music_era_heatmap(cluster_data, sample_size=0.1, grid_size=50, seed=42)
 plot_music_era_heatmap(cluster_results, sample_size=0.3, grid_size=30)
 
 # %% plot music feature trends
-def plot_music_trends(cluster_data, sample_size=0.1, seed=42, window_size=3):
+def plot_music_trends(cluster_data, sample_size=0.1, seed=None, window_size=3, milestone_years=None):
     """
     Plot trends of different musical features over time using smoothed curves in separate facets
     
     Args:
         cluster_data: Clustered data containing musical features
         sample_size: Fraction of data to sample (default: 0.1)
-        seed: Random seed for sampling (default: 42)
+        seed: Random seed for sampling (default: None)
         window_size: Size of rolling window for smoothing (default: 3)
+        milestone_years: List of years to mark with vertical lines (default: None)
     """
     # Sample and prepare data
     _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
     
     # Features to analyze
-    features = ['danceability', 'energy', 'valence', 'acousticness', 
-                'instrumentalness', 'speechiness', 'tempo', 'loudness', 'duration_ms','key','mode','time_signature']
+    features = ['acousticness', 'instrumentalness','mode', 
+    'danceability', 'valence', 'tempo', 
+    'energy', 'time_signature','loudness', 
+    'duration_ms','key','speechiness']
     
     # Calculate yearly averages, se and normalize
     yearly_trends = pd.DataFrame()
@@ -1344,6 +1349,13 @@ def plot_music_trends(cluster_data, sample_size=0.1, seed=42, window_size=3):
                        alpha=0.2,
                        label='±1 SE')
         
+        # Add vertical lines for milestone years if provided
+        if milestone_years is not None:
+            for year in milestone_years:
+                if year >= yearly_trends.index.min() and year <= yearly_trends.index.max():
+                    ax.axvline(x=year, color='red', linestyle='--', alpha=0.5, 
+                             label=f'Milestone {year}')
+        
         ax.set_xlabel('Year')
         ax.set_ylabel('Normalized Score')
         ax.set_title(feature.capitalize())
@@ -1363,17 +1375,17 @@ def plot_music_trends(cluster_data, sample_size=0.1, seed=42, window_size=3):
     plt.show()
 
 # Example usage
-plot_music_trends(cluster_results, sample_size=0.1, window_size=14)
+plot_music_trends(cluster_results, sample_size=0.1, window_size=14, milestone_years=[1950, 1985])
 
-# %%
-def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=42):
+# %% time series analysis using prophet
+def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=None):
     """
     Perform time series analysis on musical features by year using Facebook Prophet
     
     Args:
         cluster_data: Clustered data containing musical features
         sample_size: Fraction of data to sample (default: 0.1) 
-        seed: Random seed for sampling (default: 42)
+        seed: Random seed for sampling (default: None)
     """
     from prophet import Prophet
     
@@ -1414,7 +1426,7 @@ def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=42):
         model = Prophet(yearly_seasonality=False, 
                        weekly_seasonality=False, 
                        daily_seasonality=False,
-                       changepoint_prior_scale=0.05,
+                       changepoint_prior_scale=0.001,
                        changepoints=changepoints_list)
         model.fit(prophet_df)
         
@@ -1485,6 +1497,114 @@ def analyze_feature_trends_prophet(cluster_data, sample_size=0.1, seed=42):
     plt.show()
 
 # Example usage
-analyze_feature_trends_prophet(cluster_results, sample_size=0.5)
+analyze_feature_trends_prophet(cluster_results, sample_size=0.1)
+
+# %%
+def analyze_yearly_song_counts(df, intervals=[(1950,1980), (1980,2000), (2000,2020)], sample_frac=0.1):
+    """
+    Analyze yearly song count trends for different time intervals using Prophet
+    
+    Args:
+        df: Spark DataFrame with song data
+        intervals: List of (start_year, end_year) tuples defining time periods
+        sample_frac: Fraction of data to sample
+    """
+    
+    # Sample data
+    df_sample = df.sample(withReplacement=False, fraction=sample_frac)
+    
+    # Convert to pandas and extract year from release_date
+    pdf = df_sample.toPandas()
+    pdf['year'] = pd.to_datetime(pdf['release_date']).dt.year
+    
+    # Count songs per year
+    yearly_counts = pdf.groupby('year').size().reset_index()
+    yearly_counts.columns = ['year', 'count']
+    
+    # Create figure
+    n_intervals = len(intervals)
+    fig, axes = plt.subplots(n_intervals, 1, figsize=(12, 5*n_intervals))
+    if n_intervals == 1:
+        axes = [axes]
+    
+    for i, (start_year, end_year) in enumerate(intervals):
+        # Filter data for interval
+        interval_data = yearly_counts[
+            (yearly_counts['year'] >= start_year) & 
+            (yearly_counts['year'] <= end_year)
+        ].copy()  # Add .copy() to avoid SettingWithCopyWarning
+        
+        if len(interval_data) == 0:
+            print(f"No data found for interval {start_year}-{end_year}")
+            continue
+            
+        # Prepare data for Prophet
+        prophet_df = interval_data.rename(columns={'year': 'ds', 'count': 'y'})
+        prophet_df['ds'] = pd.to_datetime(prophet_df['ds'].astype(str))
+        
+        try:
+            # Fit Prophet model
+            model = Prophet(changepoint_prior_scale=0.05,
+                          yearly_seasonality=False)
+            model.fit(prophet_df)
+            
+            # Make future predictions
+            future = model.make_future_dataframe(periods=5, freq='Y')
+            forecast = model.predict(future)
+            
+            # Calculate trend metrics
+            trend_change = (forecast['trend'].iloc[-1] - forecast['trend'].iloc[0]) / len(forecast)
+            trend_acceleration = np.diff(forecast['trend']).mean()
+            
+            # Plot
+            ax = axes[i]
+            
+            # Plot actual counts
+            ax.scatter(prophet_df['ds'], prophet_df['y'], 
+                      color='blue', alpha=0.6, label='Actual')
+            
+            # Plot predictions and confidence interval
+            ax.plot(forecast['ds'], forecast['yhat'], 
+                    color='red', label='Predicted')
+            ax.fill_between(forecast['ds'],
+                           forecast['yhat_lower'],
+                           forecast['yhat_upper'],
+                           color='red', alpha=0.2,
+                           label='Confidence Interval')
+            
+            # Add changepoint lines
+            for changepoint in model.changepoints:
+                ax.axvline(x=changepoint, color='green', linestyle='--', alpha=0.5)
+            
+            # Add trend analysis text
+            ax.text(0.02, 0.98,
+                    f'Period: {start_year}-{end_year}\n'
+                    f'Trend Change: {trend_change:.2f} songs/year\n'
+                    f'Acceleration: {trend_acceleration:.2f} songs/year²',
+                    transform=ax.transAxes,
+                    verticalalignment='top',
+                    bbox=dict(facecolor='white', alpha=0.8))
+            
+            ax.set_xlabel('Year')
+            ax.set_ylabel('Number of Songs')
+            ax.set_title(f'Song Count Trend Analysis ({start_year}-{end_year})')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            # Rotate x-axis labels
+            ax.tick_params(axis='x', rotation=45)
+            
+        except Exception as e:
+            print(f"Error analyzing interval {start_year}-{end_year}: {str(e)}")
+            continue
+    
+    plt.suptitle('Time Series Analysis of Yearly Song Counts Using Prophet',
+                 y=1.02, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+intervals = [(1950,1980), (1980,2000), (2000,2020)]
+analyze_yearly_song_counts(df, intervals=intervals, sample_frac=0.1)
 
 # %%
