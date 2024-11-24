@@ -25,6 +25,7 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
+print(df.count())
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
 df.columns
@@ -280,11 +281,16 @@ merged_results = kmeans_predictions_pca.withColumn("tmp_id", F.monotonically_inc
             .join(df,on=["id","name","artist"],how="inner")
 merged_results.show()
 merged_results.count()
-#examine cluster distribution
-merged_results.groupby('prediction') \
-               .count() \
-               .show()
-cluster_results=merged_results.filter(F.col("prediction") != 3)
+
+# Get cluster counts
+cluster_counts = merged_results.groupby('prediction').count()
+cluster_counts.show()
+
+# Filter out clusters with less than 100000 songs
+small_clusters = cluster_counts.filter(F.col("count") < 100000).select("prediction").rdd.flatMap(lambda x: x).collect()
+cluster_results = merged_results.filter(~F.col("prediction").isin(small_clusters))
+
+# Show remaining cluster distribution
 cluster_results.groupby('prediction') \
                .count() \
                .show()
@@ -1617,6 +1623,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             seasonality_mode='additive',
             changepoint_prior_scale=0.1,
             holidays_prior_scale=10.0,
+            n_changepoints=0
         )
         
         # Add custom seasonality
@@ -1627,16 +1634,16 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
         )
         
         # Add regressors for intercept and slope changes
-        for event_year in [1999, 2015]:
-            model.add_regressor(f'streaming_{event_year}')
-            model.add_regressor(f'year_since_{event_year}')
+        for event_year in events:
+            model.add_regressor(f'streaming_{event_year}',prior_scale=20)
+            model.add_regressor(f'year_since_{event_year}',prior_scale=10)
         
         # Step 5: Fit the model
         model.fit(df)
         
         # Step 6: Make future predictions
         future = model.make_future_dataframe(periods=forecast_years, freq='Y')
-        for event_year in [1999, 2015]:
+        for event_year in events:
             future[f'year_since_{event_year}'] = (future['ds'].dt.year - event_year).clip(lower=0)
             future[f'streaming_{event_year}'] = (future['ds'] >= f'{event_year}-01-01').astype(int)
         
@@ -1696,23 +1703,20 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
 prophet_results = time_series_analysis(
     cluster_results, 
     distance_type='historical',#historical, internal
-    sample_size=0.3,
-    bins=[0,1,2,3,100],#0,0.5,1, 1.5, 2, 2.5, 100
+    sample_size=0.5,
+    bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
     cycle_years=40,#40
     holidays=['1966-01-01', '1993-01-01'],
-    events=[1999, 2015]
+    events=[1999]
 )
 
 #2个标准差外的
 # %%
-#不同参数：长周期；傅立叶阶数
+#自动：不同参数：长周期；傅立叶阶数
 #检验
 
 #更大比例；不同距离；seed
 
 #拼图
 
-
-#年限
-#
