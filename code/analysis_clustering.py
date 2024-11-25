@@ -1272,12 +1272,14 @@ plot_music_trends(cluster_results, sample_size=0.1, window_size=14, milestone_ye
 
 
 
+
+#%%
+
+
 # %% time series analysis
-import seaborn as sns
 def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=None,
-                                   bins=[0, 1, 2, 3, 4], distance_type='historical',
-                                   forecast_years=10, cycle_years=40, holidays=None, events=None,
-                                   cut_off_year=1970):
+                                   bins=[0, 100], distance_type='historical',
+                                   forecast_years=0, cycle_years=40, holidays=['1966-01-01', '1993-01-01']):
     """
     Analyze innovation levels using Prophet with holidays and custom regressors for streaming periods.
     
@@ -1295,7 +1297,6 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
     from prophet import Prophet
     import pandas as pd
     import matplotlib.pyplot as plt
-    import utils
     
     # Step 1: Prepare innovation data
     results_df = plot_innovation_levels_over_time(
@@ -1322,60 +1323,13 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             'y': results_df[range_name]
         })
         
-
         # Add regressors for streaming events
-        for event_year in events:
-            df[f'year_since_{event_year}'] = (df['ds'].dt.year - event_year).clip(lower=0)
-            df[f'streaming_{event_year}'] = (df['ds'] >= f'{event_year}-01-01').astype(int)
-        
-
-        def prepare_data(data, year=1970): 
-            """
-            prepare the data for ingestion by fbprophet: 
-
-            see: https://facebook.github.io/prophet/docs/quick_start.html
-            
-            1) divide in training and test set, using the `year` parameter (int)
-            
-            2) reset the index and rename the `datetime` column to `ds`
-            
-            returns the training and test dataframes
-
-            Parameters
-            ----------
-            data : pandas.DataFrame 
-                The dataframe to prepare, needs to have a datetime index
-            year: integer 
-                The year separating the training set and the test set (includes the year)
-
-            Returns
-            -------
-            data_train : pandas.DataFrame
-                The training set, formatted for fbprophet.
-            data_test :  pandas.Dataframe
-                The test set, formatted for fbprophet.
-            """
-            
-            
-            data_train = data.loc[:str(year - 1),:]
-            
-            data_test = data.loc[str(year):,:]
-            
-            data_train.reset_index(inplace=True)
-            
-            data_test.reset_index(inplace=True)
-            
-            data_train = data_train.rename({'datetime':'ds'}, axis=1)
-            
-            data_test = data_test.rename({'datetime':'ds'}, axis=1)
-            
-            return data_train, data_test
-        # Split into train and test sets
-        train_df, test_df = prepare_data(df, cut_off_year)
+        df['year_since_streaming'] = (df['ds'].dt.year - 1999).clip(lower=0)
+        df['streaming'] = (df['ds'] >= '1999-01-01').astype(int)
         
         # Step 4: Initialize Prophet model
         model = Prophet(
-            mcmc_samples=300, 
+            mcmc_samples=300,
             yearly_seasonality=False,
             weekly_seasonality=False,
             daily_seasonality=False,
@@ -1383,7 +1337,6 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             seasonality_mode='additive',
             changepoint_prior_scale=0.1,
             holidays_prior_scale=10.0,
-            n_changepoints=0
         )
         
         # Add custom seasonality
@@ -1391,119 +1344,32 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             name='long_cycle',
             period=cycle_years * 365.25,
             fourier_order=3,
-            prior_scale=0.1
+            prior_scale=3.0
         )
         
         # Add regressors for intercept and slope changes
-        for event_year in events:
-            model.add_regressor(f'streaming_{event_year}',prior_scale=20)
-            model.add_regressor(f'year_since_{event_year}',prior_scale=10)
+        model.add_regressor('streaming', prior_scale=20.0)
+        model.add_regressor('year_since_streaming', prior_scale=10.0)
         
-        # Step 5: Fit the model on training data
-        model.fit(train_df)
+        # Step 5: Fit the model
+        model.fit(df)
         
-        # Step 6: Make predictions on test data and future
+        # Step 6: Make future predictions
         future = model.make_future_dataframe(periods=forecast_years, freq='Y')
-        for event_year in events:
-            future[f'year_since_{event_year}'] = (future['ds'].dt.year - event_year).clip(lower=0)
-            future[f'streaming_{event_year}'] = (future['ds'] >= f'{event_year}-01-01').astype(int)
+        future['year_since_streaming'] = (future['ds'].dt.year - 1999).clip(lower=0)
+        future['streaming'] = (future['ds'] >= '1999-01-01').astype(int)
         
         forecast = model.predict(future)
-        test_forecast = model.predict(test_df)
         
         # Step 7: Store results
         prophet_results[range_name] = {
             'model': model,
             'forecast': forecast,
-            'train': train_df,
-            'test': test_df,
-            'test_forecast': test_forecast
+            'actual': df
         }
         
         # Step 8: Visualization
-        def make_verif(forecast, train_df, test_df):
-            """
-            Combine forecast and observed data for verification plotting
-            
-            Args:
-                forecast: DataFrame from Prophet forecast
-                train_df: Training data DataFrame
-                test_df: Test data DataFrame
-                
-            Returns:
-                Combined DataFrame with forecasts and observations
-            """
-            # Set datetime index for all DataFrames
-            forecast.index = pd.to_datetime(forecast.ds)
-            train_df.index = pd.to_datetime(train_df.ds)
-            test_df.index = pd.to_datetime(test_df.ds)
-            
-            # Combine training and test data
-            full_data = pd.concat([train_df, test_df], axis=0)
-            
-            # Add observed values to forecast DataFrame
-            forecast.loc[:,'y'] = full_data.loc[:,'y']
-            
-            return forecast
-
-        # In the time_series_analysis function, replace the verification section with:
-        verif = make_verif(forecast, train_df, test_df)
         
-        def plot_correlation_analysis(verif, train_df, test_df):
-            """
-            Plot correlation analysis between forecast and observations using seaborn jointplots
-            
-            Args:
-                verif: Combined DataFrame with forecasts and observations
-                train_df: Training data DataFrame 
-                test_df: Test data DataFrame
-            """
-            # Split data into train and test periods
-            train_mask = verif.index.isin(train_df.index)
-            test_mask = verif.index.isin(test_df.index)
-            
-            train_data = verif[train_mask]
-            test_data = verif[test_mask]
-            # Create train period jointplot
-            g1 = sns.jointplot(
-                data=train_data,
-                x='yhat',
-                y='y', 
-                kind='reg',
-                height=8,
-                marginal_kws=dict(bins=30),
-                joint_kws={'scatter_kws': dict(alpha=0.5)}
-            )
-            g1.fig.suptitle('Training Period: Forecast vs Observations', y=1.02)
-            r_train = train_data['yhat'].corr(train_data['y'])
-            mae_train = np.mean(np.abs(train_data['yhat'] - train_data['y']))
-            g1.ax_joint.text(0.05, 0.95, f'R = {r_train:.3f}\nMAE = {mae_train:.3f}',
-                           transform=g1.ax_joint.transAxes, verticalalignment='top')
-            
-            # Create test period jointplot
-            g2 = sns.jointplot(
-                data=test_data,
-                x='yhat',
-                y='y',
-                kind='reg', 
-                height=8,
-                marginal_kws=dict(bins=30),
-                joint_kws={'scatter_kws': dict(alpha=0.5)}
-            )
-            g2.fig.suptitle('Test Period: Forecast vs Observations', y=1.02)
-            r_test = test_data['yhat'].corr(test_data['y'])
-            mae_test = np.mean(np.abs(test_data['yhat'] - test_data['y']))
-            g2.ax_joint.text(0.05, 0.95, f'R = {r_test:.3f}\nMAE = {mae_test:.3f}',
-                           transform=g2.ax_joint.transAxes, verticalalignment='top')
-            plt.tight_layout()
-            plt.show()
-            
-            return fig
-            
-        # Generate correlation plots
-        plot_correlation_analysis(verif, train_df, test_df)
-
-        raise Exception('stop here')
         # Plot components
         model.plot_components(forecast)
         plt.suptitle(f'Analysis for Innovation Range {range_name}', fontsize=14)
@@ -1519,7 +1385,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
         plt.show()
         
         # Plot regressor effects
-        regressors = [f'streaming_{event_year}' for event_year in events] + [f'year_since_{event_year}' for event_year in events]
+        regressors = ['streaming', 'year_since_streaming']
         regressor_effects = []
         
         # Safely access regressor coefficients from model parameters
@@ -1549,19 +1415,93 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
 prophet_results = time_series_analysis(
     cluster_results, 
     distance_type='historical',#historical, internal
-    sample_size=0.001,
+    sample_size=0.1,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
-    cycle_years=40,#40
-    holidays=['1966-01-01', '1993-01-01'],
-    events=[2000],
-    cut_off_year=1970
+    cycle_years=40,
+    holidays=['1966-01-01', '1993-01-01']
 )
-
 # %%
-#自动：不同参数：长周期；傅立叶阶数；强度
-#检验
-#拼图
+print(prophet_results)
+# %%
+def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
+    """
+    Visualize the fit of Prophet models and create joint plots of predicted vs observed data.
 
-#更大比例；不同距离；seed
+    Args:
+        prophet_results: Dictionary containing Prophet models and results (output of time_series_analysis).
+        bins: Optional list of bin ranges for filtering specific results.
+        figsize: Tuple specifying the figure size for plots.
+    """
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
 
+    # Iterate through each range and visualize
+    for range_name, result in prophet_results.items():
+        # If bins are specified, filter by range name
+        if bins and range_name not in bins:
+            continue
+        
+        model = result['model']
+        forecast = result['forecast']
+        actual = result['actual']
+        
+        # Merge forecast and actual data for comparison
+        merged = forecast[['ds', 'yhat']].merge(actual[['ds', 'y']], on='ds', how='inner')
+        
+        # Compute residuals
+        merged['residual'] = merged['y'] - merged['yhat']
+        
+        # Create jointplot for predicted vs observed values
+        g = sns.jointplot(
+            data=merged,
+            x='yhat',
+            y='y',
+            kind='reg',
+            height=8,
+            marginal_kws=dict(bins=30, fill=True),
+            joint_kws=dict(scatter_kws={'alpha': 0.5}),
+        )
+        
+        # Add correlation and MAE to the plot
+        r2 = np.corrcoef(merged['yhat'], merged['y'])[0, 1]**2
+        mae = np.mean(np.abs(merged['residual']))
+        g.ax_joint.text(0.05, 0.95, f"R² = {r2:.3f}\nMAE = {mae:.3f}",
+                        transform=g.ax_joint.transAxes, verticalalignment='top')
+        
+        # Titles and labels
+        g.fig.suptitle(f"Joint Plot for Range: {range_name}", y=1.02)
+        g.set_axis_labels("Predicted (yhat)", "Observed (y)")
+        plt.show()
+
+        # Plot residuals
+        plt.figure(figsize=figsize)
+        sns.histplot(merged['residual'], kde=True, bins=30, color='skyblue')
+        plt.title(f"Residual Distribution for Range: {range_name}", fontsize=14)
+        plt.xlabel("Residuals (Observed - Predicted)")
+        plt.ylabel("Frequency")
+        plt.tight_layout()
+        plt.show()
+
+        # Plot time series fit
+        plt.figure(figsize=figsize)
+        plt.plot(actual['ds'], actual['y'], label='Observed', color='blue')
+        plt.plot(forecast['ds'], forecast['yhat'], label='Predicted', color='orange')
+        plt.fill_between(
+            forecast['ds'],
+            forecast['yhat_lower'],
+            forecast['yhat_upper'],
+            color='orange', alpha=0.2, label='Prediction Interval'
+        )
+        plt.title(f"Time Series Fit for Range: {range_name}", fontsize=14)
+        plt.xlabel("Date")
+        plt.ylabel("Values")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        print(model.params)
+# %%
+visualize_fit_and_jointplot(prophet_results, bins=["0.0-2.0", "2.0-100.0"])
+# %%
