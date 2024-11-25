@@ -2428,3 +2428,459 @@ visualize_similarity_trends(within_similarity, distance_type='within-artist')
 visualize_similarity_trends(between_similarity, distance_type='between-artist')
 visualize_similarity_trends(yearly_dispersion, distance_type='yearly')
 # %%
+def calculate_yearly_dispersion_quartiles(cluster_data, sample_size=0.1, seed=42):
+    """
+    Calculate yearly dispersion quartiles of songs from their centroids in PCA space
+    
+    Args:
+        cluster_data: PySpark DataFrame with features and metadata
+        sample_size: Fraction of songs to sample (default 0.1)
+        seed: Random seed for sampling
+    
+    Returns:
+        Pandas DataFrame with yearly dispersion quartiles
+    """
+    # Sample data and prepare features (same as before)
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    sampled_data = sampled_data.withColumn('year', F.year(F.to_timestamp('release_date')))
+    sampled_data = sampled_data.withColumn('features_array', vector_to_array(F.col('features')))
+    num_features = sampled_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    for i in range(num_features):
+        sampled_data = sampled_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Calculate yearly centroids and distances (same as before)
+    yearly_centroids = sampled_data.groupBy('year').agg(
+        *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+    )
+    data_with_centroids = sampled_data.join(yearly_centroids, on='year')
+    distance_calc = '+'.join([f'pow(feature_{i} - centroid_{i}, 2)' for i in range(num_features)])
+    data_with_distances = data_with_centroids.withColumn(
+        'distance_to_centroid',
+        F.sqrt(F.expr(distance_calc))
+    )
+    
+    # Calculate yearly quartiles
+    yearly_stats = data_with_distances.groupBy('year').agg(
+        F.expr('percentile_approx(distance_to_centroid, array(0.25, 0.5, 0.75))').alias('quartiles'),
+        F.min('distance_to_centroid').alias('min'),
+        F.max('distance_to_centroid').alias('max'),
+        F.count('*').alias('song_count')
+    )
+    
+    # Convert to pandas and reshape data
+    yearly_stats_pd = yearly_stats.toPandas()
+    yearly_stats_pd[['q1', 'q2', 'q3']] = pd.DataFrame(yearly_stats_pd['quartiles'].tolist(), index=yearly_stats_pd.index)
+    yearly_stats_pd = yearly_stats_pd.drop('quartiles', axis=1)
+    yearly_stats_pd = yearly_stats_pd.sort_values('year')
+    
+    return yearly_stats_pd
+
+def compute_artist_similarity_quartiles(cluster_data, distance_type='within', sample_size=0.1, seed=42):
+    """
+    Compute artist-level similarity quartiles based on the features vector.
+    """
+    # Initial data preparation (same as before)
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    sampled_data = sampled_data.withColumn('year', F.year(F.to_timestamp('release_date')))
+    sampled_data = sampled_data.withColumn('features_array', vector_to_array(F.col('features')))
+    num_features = sampled_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    for i in range(num_features):
+        sampled_data = sampled_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    if distance_type == 'within':
+        # Calculate within-artist distances (similar to before)
+        artist_centroids = sampled_data.groupBy('artist', 'year').agg(
+            *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+        )
+        data_with_centroids = sampled_data.join(artist_centroids, on=['artist', 'year'])
+        distance_calc = '+'.join([f'pow(feature_{i} - centroid_{i}, 2)' for i in range(num_features)])
+        
+    else:  # between
+        # Calculate between-artist distances (similar to before)
+        artist_centroids = sampled_data.groupBy('artist', 'year').agg(
+            *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+        )
+        yearly_centroids = artist_centroids.groupBy('year').agg(
+            *[F.avg(F.col(f'centroid_{i}')).alias(f'global_centroid_{i}') for i in range(num_features)]
+        )
+        data_with_centroids = artist_centroids.join(yearly_centroids, on='year')
+        distance_calc = '+'.join([f'pow(centroid_{i} - global_centroid_{i}, 2)' for i in range(num_features)])
+    
+    data_with_distances = data_with_centroids.withColumn(
+        'distance_to_centroid',
+        F.sqrt(F.expr(distance_calc))
+    )
+    
+    # Calculate yearly quartiles
+    yearly_stats = data_with_distances.groupBy('year').agg(
+        F.expr('percentile_approx(distance_to_centroid, array(0.25, 0.5, 0.75))').alias('quartiles'),
+        F.min('distance_to_centroid').alias('min'),
+        F.max('distance_to_centroid').alias('max'),
+        F.count('*').alias('count')
+    )
+    
+    # Convert to pandas and reshape data
+    yearly_stats_pd = yearly_stats.toPandas()
+    yearly_stats_pd[['q1', 'q2', 'q3']] = pd.DataFrame(yearly_stats_pd['quartiles'].tolist(), index=yearly_stats_pd.index)
+    yearly_stats_pd = yearly_stats_pd.drop('quartiles', axis=1)
+    yearly_stats_pd = yearly_stats_pd.sort_values('year')
+    
+    return yearly_stats_pd
+# Example usage
+#yearly_dispersion_quartiles = calculate_yearly_dispersion_quartiles(cluster_results, sample_size=0.9)
+#within_similarity_quartiles = compute_artist_similarity_quartiles(cluster_results, distance_type='within', sample_size=0.9)
+#between_similarity_quartiles = compute_artist_similarity_quartiles(cluster_results, distance_type='between', sample_size=0.9)
+#%%
+def visualize_similarity_trends_quartiles(data, distance_type='within'):
+    """
+    Visualize similarity trends with quartiles using lines.
+    
+    Args:
+        data: Pandas DataFrame containing yearly quartile metrics
+        distance_type: Type of similarity being visualized
+    """
+    plt.figure(figsize=(12, 6))
+    
+    # Use colormap for different lines
+    cmap = plt.cm.viridis
+    colors = [cmap(i) for i in np.linspace(0, 1, 5)]
+    
+    # Plot lines for different percentiles
+    plt.plot(data['year'], data['q1'], '-', color=colors[1], label='25th percentile', alpha=0.7)
+    plt.plot(data['year'], data['q2'], '-', color=colors[2], label='Median', linewidth=2)
+    plt.plot(data['year'], data['q3'], '-', color=colors[3], label='75th percentile', alpha=0.7)
+    
+    # Customize plot
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Year')
+    plt.ylabel('Distance')
+    plt.title(f'{distance_type.capitalize()} Innovation Distribution Over Time')
+    plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
+    plt.tight_layout()
+    plt.show()
+
+# Visualize results
+#visualize_similarity_trends_quartiles(yearly_dispersion_quartiles, distance_type='yearly')
+#visualize_similarity_trends_quartiles(within_similarity_quartiles, distance_type='within-artist')
+#visualize_similarity_trends_quartiles(between_similarity_quartiles, distance_type='between-artist')
+# %%
+# %% Optimized time series analysis with distributed computing
+def distributed_time_series_analysis(cluster_data, sample_size=0.1, seed=None,
+                                   bins=[0,2,100],
+                                   forecast_years=0, cycle_years=40, holidays=['1966-01-01', '1993-01-01']):
+    """
+    Distributed version of time series analysis using PySpark for data processing
+    """
+    # Sample and prepare data using Spark
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Extract year and convert features to array
+    prepared_data = sampled_data.withColumn(
+        'year',
+        F.year(F.to_timestamp('release_date'))
+    ).withColumn(
+        'features_array', 
+        vector_to_array(F.col('features'))
+    )
+    
+    # Get number of dimensions
+    num_features = prepared_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    # Extract features into columns
+    for i in range(num_features):
+        prepared_data = prepared_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Calculate yearly centroids using Spark
+    yearly_centroids = prepared_data.groupBy('year').agg(
+        *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+    )
+    # Join centroids and calculate distances
+    data_with_centroids = prepared_data.join(yearly_centroids, on='year')
+    distance_calc = '+'.join([f'pow(feature_{i} - centroid_{i}, 2)' for i in range(num_features)])
+    data_with_distances = data_with_centroids.withColumn(
+        'distance_to_centroid',
+        F.sqrt(F.expr(distance_calc))
+    )
+    
+    # Calculate bin distributions using raw distances
+    bin_edges = bins
+    bin_ranges = [f"{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}" for i in range(len(bin_edges)-1)]
+    yearly_distributions = data_with_distances.groupBy('year').agg(
+        *[
+            F.sum(F.when((F.col('distance_to_centroid') >= bin_edges[i]) & 
+                        (F.col('distance_to_centroid') < bin_edges[i+1]), 1)
+                 .otherwise(0)).alias(f"{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}")
+            for i in range(len(bin_edges)-1)
+        ]
+    )
+    # Convert to pandas for Prophet analysis
+    yearly_distributions_pd = yearly_distributions.toPandas().sort_values('year')
+    
+    # Initialize Prophet results dictionary
+    prophet_results = {}
+    
+    # Define holidays DataFrame
+    holidays_df = None
+    if holidays:
+        holidays_df = pd.DataFrame({
+            'holiday': 'innovation_peak',
+            'ds': pd.to_datetime(holidays),
+            'lower_window': -2,
+            'upper_window': 2,
+        })
+
+    print(yearly_distributions_pd)
+    
+    # Fit Prophet models for each bin range
+    for range_name in bin_ranges:
+        # Prepare data for Prophet
+        df = pd.DataFrame({
+            'ds': pd.to_datetime(yearly_distributions_pd['year'].astype(str) + '-01-01'),
+            'y': yearly_distributions_pd[range_name]
+        })
+        
+        # Add streaming regressors
+        df['year_since_streaming'] = (df['ds'].dt.year - 1999).clip(lower=0)
+        df['streaming'] = (df['ds'] >= '1999-01-01').astype(int)
+        
+        # Initialize and fit Prophet model
+        model = Prophet(
+            mcmc_samples=200,
+            yearly_seasonality=False,
+            weekly_seasonality=False,
+            daily_seasonality=False,
+            holidays=holidays_df,
+            seasonality_mode='additive',
+            changepoint_prior_scale=0.001,
+            holidays_prior_scale=10.0,
+        )
+        
+        # Add custom seasonality and regressors
+        model.add_seasonality(
+            name='long_cycle',
+            period=cycle_years * 365.25,
+            fourier_order=3,
+            prior_scale=1.0
+        )
+        model.add_regressor('streaming', prior_scale=10.0)
+        model.add_regressor('year_since_streaming', prior_scale=10.0)
+        
+        # Fit model
+        model.fit(df)
+        
+        # Make future predictions if requested
+        future = model.make_future_dataframe(periods=forecast_years, freq='Y')
+        future['year_since_streaming'] = (future['ds'].dt.year - 1999).clip(lower=0)
+        future['streaming'] = (future['ds'] >= '1999-01-01').astype(int)
+        forecast = model.predict(future)
+        
+        # Store results
+        prophet_results[range_name] = {
+            'model': model,
+            'forecast': forecast,
+            'actual': df
+        }
+        
+        # Visualize results
+        model.plot_components(forecast)
+        plt.suptitle(f'Analysis for Innovation Range {range_name}', fontsize=14)
+        plt.tight_layout()
+        plt.show()
+        
+        plt.figure(figsize=(12, 6))
+        fig = model.plot(forecast)
+        plt.title(f'Innovation Level Forecast for Range {range_name}\n(Including Regressor Effects)', fontsize=14)
+        plt.tight_layout()
+        plt.show()
+    
+    return prophet_results, data_with_distances
+
+
+# fitting and jointplot visualization
+def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
+    """
+    Visualize the fit of Prophet models and create joint plots of predicted vs observed data.
+
+    Args:
+        prophet_results: Dictionary containing Prophet models and results (output of time_series_analysis).
+        bins: Optional list of bin ranges for filtering specific results. If None, use all bins.
+        figsize: Tuple specifying the figure size for plots.
+    """
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
+
+    # Get all available bins if not specified
+    available_bins = list(prophet_results.keys())
+    bins_to_plot = bins if bins is not None else available_bins
+
+    # Iterate through each range and visualize
+    for range_name in bins_to_plot:
+        if range_name not in prophet_results:
+            print(f"Warning: Range {range_name} not found in prophet_results")
+            continue
+            
+        result = prophet_results[range_name]
+        model = result['model']
+        forecast = result['forecast']
+        actual = result['actual']
+        
+        # Merge forecast and actual data for comparison
+        merged = forecast[['ds', 'yhat']].merge(actual[['ds', 'y']], on='ds', how='inner')
+        merged['residual'] = merged['y'] - merged['yhat']
+        
+        # Create jointplot for predicted vs observed values
+        g = sns.jointplot(
+            data=merged,
+            x='yhat',
+            y='y',
+            kind='reg',
+            height=8,
+            marginal_kws=dict(bins=30, fill=True),
+            joint_kws=dict(scatter_kws={'alpha': 0.5}),
+        )
+        
+        # Add correlation and MAE to the plot
+        r2 = np.corrcoef(merged['yhat'], merged['y'])[0, 1]**2
+        mae = np.mean(np.abs(merged['residual']))
+        g.ax_joint.text(0.05, 0.95, f"R² = {r2:.3f}\nMAE = {mae:.3f}",
+                        transform=g.ax_joint.transAxes, verticalalignment='top')
+        
+        # Titles and labels
+        g.fig.suptitle(f"Joint Plot for Range: {range_name}", y=1.02)
+        g.set_axis_labels("Predicted (yhat)", "Observed (y)")
+        plt.show()
+
+        # Plot residuals
+        plt.figure(figsize=figsize)
+        sns.histplot(merged['residual'], kde=True, bins=30, color='#3C76AF')
+        plt.title(f"Residual Distribution for Range: {range_name}", fontsize=14)
+        plt.xlabel("Residuals (Observed - Predicted)")
+        plt.ylabel("Frequency")
+        plt.tight_layout()
+        plt.show()
+
+        # Plot time series fit
+        plt.figure(figsize=figsize)
+        plt.scatter(actual['ds'], actual['y'], label='Observed', color='black',alpha=0.8, s=20)
+        plt.plot(forecast['ds'], forecast['yhat'], label='Predicted', color='#3C76AF',linewidth=2)
+        plt.fill_between(
+            forecast['ds'],
+            forecast['yhat_lower'],
+            forecast['yhat_upper'],
+            color='#3a76AF', alpha=0.2, label='Prediction Interval'
+        )
+        plt.title(f"Time Series Fit for Range: {range_name}", fontsize=14)
+        plt.xlabel("Date")
+        plt.ylabel("Values")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        print(f"Range: {range_name}")
+
+def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regressors, bins=None):
+    """
+    Extract and visualize regressor coefficients with credible intervals (CI) from Prophet models.
+    
+    Args:
+        prophet_results: Dictionary containing Prophet models and results.
+        regressors: List of regressors to analyze.
+        bins: Optional list of range names to include in the analysis. If None, use all bins.
+    """
+    import numpy as np
+    from prophet.utilities import regressor_coefficients
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    # Get all available bins if not specified
+    available_bins = list(prophet_results.keys())
+    bins_to_analyze = bins if bins is not None else available_bins
+
+    coefficients = []
+    
+
+    for range_name in bins_to_analyze:
+        if range_name not in prophet_results:
+            print(f"Warning: Range {range_name} not found in prophet_results")
+            continue
+            
+        result = prophet_results[range_name]
+        model = result['model']
+        regressor_data = regressor_coefficients(model)
+        
+        if 'coef' in regressor_data.columns:
+            for _, row in regressor_data.iterrows():
+                if row['regressor'] in regressors:
+                    coefficients.append({
+                        'range': range_name,
+                        'regressor': 'intercept' if row['regressor'] == 'streaming' else 'slope',
+                        'coefficient': row['coef'],
+                        'lower_bound': row['coef_lower'] if 'coef_lower' in row else np.nan,
+                        'upper_bound': row['coef_upper'] if 'coef_upper' in row else np.nan
+                    })
+
+    coefficients_df = pd.DataFrame(coefficients)
+    print("\nRegressor Coefficients Summary:")
+    print(coefficients_df)
+    
+    # Create visualization
+    plt.figure(figsize=(8, 6))
+    
+    # Generate colors dynamically based on number of ranges
+    unique_ranges = coefficients_df['range'].unique()
+    colors = plt.cm.Set2(np.linspace(0, 1, len(unique_ranges)))
+    range_colors = dict(zip(unique_ranges, colors))
+
+    # Plot coefficients with error bars
+    for i, regressor in enumerate(['intercept', 'slope']):
+        regressor_data = coefficients_df[coefficients_df['regressor'] == regressor]
+        x_positions = np.arange(len(regressor_data)) + i * 0.45
+        
+        for j, (idx, row) in enumerate(regressor_data.iterrows()):
+            plt.errorbar(x_positions[j], 
+                        row['coefficient'],
+                        yerr=[[row['coefficient'] - row['lower_bound']],
+                              [row['upper_bound'] - row['coefficient']]],
+                        fmt='o',
+                        capsize=5,
+                        capthick=2,
+                        label=f"{regressor} ({row['range']})",
+                        markersize=8,
+                        color=range_colors[row['range']])
+
+    # Customize plot
+    plt.xticks(np.arange(len(unique_ranges)) + 0.175, unique_ranges)
+    plt.xlabel('Innovation Level')
+    plt.ylabel('Coefficient Value')
+    plt.title('Regressor Coefficients with 95% CI')
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+visualize_fit_and_jointplot(prophet_results)
+extract_and_visualize_regressor_coefficients_with_ci(
+    prophet_results,
+    regressors=['streaming', 'year_since_streaming']
+)
+
+
+
+
+# %%
+# Example usage
+prophet_results, processed_data = distributed_time_series_analysis(
+    cluster_results, 
+    sample_size=0.01,
+    bins=[0,0.5,1,2,3,100],
+    forecast_years=0,
+    cycle_years=40,
+    holidays=['1966-01-01', '1993-01-01']
+)
+# %%
