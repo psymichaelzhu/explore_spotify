@@ -1474,7 +1474,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
                 marginal_kws=dict(bins=30),
                 joint_kws={'scatter_kws': dict(alpha=0.5)}
             )
-            g1.suptitle('Training Period: Forecast vs Observations', y=1.02)
+            g1.fig.suptitle('Training Period: Forecast vs Observations', y=1.02)
             r_train = train_data['yhat'].corr(train_data['y'])
             mae_train = np.mean(np.abs(train_data['yhat'] - train_data['y']))
             g1.ax_joint.text(0.05, 0.95, f'R = {r_train:.3f}\nMAE = {mae_train:.3f}',
@@ -1490,7 +1490,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
                 marginal_kws=dict(bins=30),
                 joint_kws={'scatter_kws': dict(alpha=0.5)}
             )
-            g2.suptitle('Test Period: Forecast vs Observations', y=1.02)
+            g2.fig.suptitle('Test Period: Forecast vs Observations', y=1.02)
             r_test = test_data['yhat'].corr(test_data['y'])
             mae_test = np.mean(np.abs(test_data['yhat'] - test_data['y']))
             g2.ax_joint.text(0.05, 0.95, f'R = {r_test:.3f}\nMAE = {mae_test:.3f}',
