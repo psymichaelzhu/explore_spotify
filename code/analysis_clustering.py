@@ -1384,31 +1384,6 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
         plt.tight_layout()
         plt.show()
         
-        # Plot regressor effects
-        regressors = ['streaming', 'year_since_streaming']
-        regressor_effects = []
-        
-        # Safely access regressor coefficients from model parameters
-        for name in regressors:
-            try:
-                # Convert params['beta'] to a dictionary if it's a Series/DataFrame
-                beta_params = dict(zip(model.extra_regressors.keys(), 
-                                     model.params['beta'].flatten()))
-                effect = beta_params.get(name, 0)
-                regressor_effects.append(effect)
-            except Exception as e:
-                print(f"Warning: Could not get effect for regressor {name}: {e}")
-                regressor_effects.append(0)
-        
-        plt.figure(figsize=(10, 5))
-        plt.bar(regressors, regressor_effects, color='skyblue')
-        plt.title('Regressor Effects on Innovation Levels', fontsize=14)
-        plt.ylabel('Effect Size')
-        plt.xlabel('Regressors')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.show()
-    
     return prophet_results
 
 def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
@@ -1672,6 +1647,92 @@ def extract_and_visualize_regressor_coefficients_with_hdi(prophet_results, regre
 
 # Example Usage
 extract_and_visualize_regressor_coefficients_with_hdi(
+    prophet_results,
+    regressors=['streaming', 'year_since_streaming'],
+    bins=["2.0-100.0", "0.0-2.0"]
+)
+
+# %%
+import numpy as np
+from prophet.utilities import regressor_coefficients
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regressors, bins=None):
+    """
+    Extract and visualize regressor coefficients with credible intervals (CI) from Prophet models.
+    
+    Args:
+        prophet_results: Dictionary containing Prophet models and results.
+        regressors: List of regressors to analyze.
+        bins: Optional list of range names to include in the analysis.
+    """
+    coefficients = []
+
+    for range_name, result in prophet_results.items():
+        if bins and range_name not in bins:
+            continue
+
+        # Extract coefficients and credible intervals
+        model = result['model']
+        regressor_data = regressor_coefficients(model)
+        
+        if 'coef' in regressor_data.columns:
+            for _, row in regressor_data.iterrows():
+                if row['regressor'] in regressors:
+                    coefficients.append({
+                        'range': range_name,
+                        'regressor': 'intercept' if row['regressor'] == 'streaming' else 'slope',
+                        'coefficient': row['coef'],
+                        'lower_bound': row['coef_lower'] if 'coef_lower' in row else np.nan,
+                        'upper_bound': row['coef_upper'] if 'coef_upper' in row else np.nan
+                    })
+
+    coefficients_df = pd.DataFrame(coefficients)
+    print(coefficients_df)
+    
+    # Create a figure for coefficient visualization
+    plt.figure(figsize=(12, 6))
+
+    # Define colors for each range
+    range_colors = {
+        "2.0-100.0": "#4169E1",  # Royal blue with lower saturation
+        "0.0-2.0": "#CD5C5C"     # Indian red with lower saturation
+    }
+
+    # Plot coefficients with error bars
+    for i, regressor in enumerate(['intercept', 'slope']):
+        regressor_data = coefficients_df[coefficients_df['regressor'] == regressor]
+        
+        # Calculate x positions for each range, offset by regressor
+        x_positions = np.arange(len(regressor_data)) + i * 0.35
+        
+        for j, (idx, row) in enumerate(regressor_data.iterrows()):
+            plt.errorbar(x_positions[j], 
+                        row['coefficient'],
+                        yerr=[[row['coefficient'] - row['lower_bound']],
+                              [row['upper_bound'] - row['coefficient']]],
+                        fmt='o',
+                        capsize=5,
+                        capthick=2,
+                        label=f"{regressor} ({row['range']})",
+                        markersize=8,
+                        color=range_colors[row['range']])
+
+    # Customize plot
+    plt.xticks(np.arange(len(bins)) + 0.175, bins, rotation=45)
+    plt.xlabel('Innovation Range')
+    plt.ylabel('Coefficient Value')
+    plt.title('Regressor Coefficients with 95% Credible Intervals')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+# Example Usage
+extract_and_visualize_regressor_coefficients_with_ci(
     prophet_results,
     regressors=['streaming', 'year_since_streaming'],
     bins=["2.0-100.0", "0.0-2.0"]
