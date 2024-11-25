@@ -1,6 +1,6 @@
 
 # %% Load data and packages
-
+#environment: amd 2nodes 60G 
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import SparkSession, Row
 from pyspark.ml.linalg import Vectors
@@ -1270,13 +1270,7 @@ plot_music_trends(cluster_results, sample_size=0.1, window_size=14, milestone_ye
 
 
 
-
-
-
-#%%
-
-
-# %% time series analysis: train a model and cross-validate
+# %% time series analysis: function
 def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=None,
                                    bins=[0, 100], distance_type='historical',
                                    forecast_years=0, cycle_years=40, holidays=['1966-01-01', '1993-01-01']):
@@ -1505,15 +1499,15 @@ def generate_new_df(prophet_results, cluster_data, artist_name=None, sample_size
     return new_results
 
 
-#%% cross-validation
+#%% cross-validation: 滚动CV
 splits = cluster_results.randomSplit([0.5, 0.5], seed=42)
 cluster_results_1 = splits[0]
 cluster_results_2 = splits[1]
-sample_size = 0.01
-
+sample_size = 0.2
+distance_type = 'internal'
 prophet_results = time_series_analysis(
     cluster_results_1, 
-    distance_type='historical',#historical, internal
+    distance_type=distance_type,#historical, internal
     sample_size=sample_size,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
@@ -1523,7 +1517,7 @@ prophet_results = time_series_analysis(
 new_results = generate_new_df(
     prophet_results, 
     cluster_results_2, 
-    distance_type='historical',#historical, internal
+    distance_type=distance_type,#historical, internal
     sample_size=sample_size,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
@@ -1568,91 +1562,8 @@ plt.show()
 
 
 
-# %%
-import numpy as np
-from prophet.utilities import regressor_coefficients
 
-def extract_and_visualize_regressor_coefficients_with_hdi(prophet_results, regressors, bins=None):
-    """
-    Extract and visualize regressor coefficients with 95% HDI from Prophet models.
-    
-    Args:
-        prophet_results: Dictionary containing Prophet models and results.
-        regressors: List of regressors to analyze.
-        bins: Optional list of range names to include in the analysis.
-    """
-    coefficients = []
-
-    for range_name, result in prophet_results.items():
-        if bins and range_name not in bins:
-            continue
-
-        # Extract coefficients and credible intervals
-        model = result['model']
-        regressor_data = regressor_coefficients(model)
-        print(range_name)
-        print(regressor_data)
-
-        # Check if MCMC samples are available for credible intervals
-        if 'coef' in regressor_data.columns:
-            for _, row in regressor_data.iterrows():
-                if row['regressor'] in regressors:
-                    # Calculate 95% HDI from MCMC samples
-                    if model.mcmc_samples:
-                        regressor_index = list(model.extra_regressors.keys()).index(row['regressor'])
-                        mcmc_samples = model.params['beta'][:, regressor_index]
-                        lower_bound = np.percentile(mcmc_samples, 2.5)
-                        upper_bound = np.percentile(mcmc_samples, 97.5)
-                    else:
-                        lower_bound, upper_bound = np.nan, np.nan
-
-                    coefficients.append({
-                        'range': range_name,
-                        'regressor': row['regressor'],
-                        'beta': row['coef'],
-                        'lower_bound': lower_bound,
-                        'upper_bound': upper_bound
-                    })
-
-    coefficients_df = pd.DataFrame(coefficients)
-
-    # Visualization
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-
-    sns.set(style="whitegrid")
-    plt.figure(figsize=(10, 6))
-    sns.pointplot(
-        data=coefficients_df,
-        x='range', y='beta', hue='regressor',
-        dodge=True, join=False, palette="muted",
-        markers=["o", "s"], ci=None
-    )
-
-    # Add credible intervals as error bars
-    for i, row in coefficients_df.iterrows():
-        plt.plot(
-            [i, i],
-            [row['lower_bound'], row['upper_bound']],
-            color='gray', alpha=0.7, linestyle="--"
-        )
-
-    plt.axhline(0, color='black', linestyle='--', linewidth=1, label="Zero Line")
-    plt.title("Regressor Coefficients with Credible Intervals")
-    plt.xlabel("Range")
-    plt.ylabel("Coefficient Value")
-    plt.legend(title="Regressor")
-    plt.tight_layout()
-    plt.show()
-
-# Example Usage
-extract_and_visualize_regressor_coefficients_with_hdi(
-    prophet_results,
-    regressors=['streaming', 'year_since_streaming'],
-    bins=["2.0-100.0", "0.0-2.0"]
-)
-
-# %%
+# %% coefficient visualization
 import numpy as np
 from prophet.utilities import regressor_coefficients
 import pandas as pd
@@ -1682,7 +1593,7 @@ def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regres
             for _, row in regressor_data.iterrows():
                 if row['regressor'] in regressors:
                     coefficients.append({
-                        'range': range_name,
+                        'range': 'Low' if range_name == '0.0-2.0' else 'High',
                         'regressor': 'intercept' if row['regressor'] == 'streaming' else 'slope',
                         'coefficient': row['coef'],
                         'lower_bound': row['coef_lower'] if 'coef_lower' in row else np.nan,
@@ -1693,12 +1604,12 @@ def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regres
     print(coefficients_df)
     
     # Create a figure for coefficient visualization
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(4, 6))
 
     # Define colors for each range
     range_colors = {
-        "2.0-100.0": "#4169E1",  # Royal blue with lower saturation
-        "0.0-2.0": "#CD5C5C"     # Indian red with lower saturation
+        "High": "#4169E1",  # Royal blue with lower saturation
+        "Low": "#CD5C5C"     # Indian red with lower saturation
     }
 
     # Plot coefficients with error bars
@@ -1706,7 +1617,7 @@ def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regres
         regressor_data = coefficients_df[coefficients_df['regressor'] == regressor]
         
         # Calculate x positions for each range, offset by regressor
-        x_positions = np.arange(len(regressor_data)) + i * 0.35
+        x_positions = np.arange(len(regressor_data)) + i * 0.45
         
         for j, (idx, row) in enumerate(regressor_data.iterrows()):
             plt.errorbar(x_positions[j], 
@@ -1721,8 +1632,8 @@ def extract_and_visualize_regressor_coefficients_with_ci(prophet_results, regres
                         color=range_colors[row['range']])
 
     # Customize plot
-    plt.xticks(np.arange(len(bins)) + 0.175, bins, rotation=45)
-    plt.xlabel('Innovation Range')
+    plt.xticks(np.arange(len(bins)) + 0.175, ['Low', 'High'])
+    plt.xlabel('Innovation Level')
     plt.ylabel('Coefficient Value')
     plt.title('Regressor Coefficients with 95% Credible Intervals')
     plt.grid(True, alpha=0.3)
@@ -1737,5 +1648,6 @@ extract_and_visualize_regressor_coefficients_with_ci(
     regressors=['streaming', 'year_since_streaming'],
     bins=["2.0-100.0", "0.0-2.0"]
 )
+
 
 # %%
