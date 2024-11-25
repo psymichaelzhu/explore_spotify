@@ -1,4 +1,3 @@
-
 # %% Load data and packages
 #environment: amd 2nodes 60G 
 from pyspark import SparkContext, SparkConf
@@ -10,11 +9,14 @@ from pyspark.ml.evaluation import ClusteringEvaluator
 from pyspark.mllib.feature import StandardScaler as StandardScalerRDD
 from pyspark.mllib.linalg.distributed import RowMatrix
 import pyspark.sql.functions as F
+from pyspark.ml.functions import vector_to_array
+from pyspark.sql.types import DoubleType, ArrayType
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import matplotlib.animation as animation
 from prophet import Prophet
+from scipy.stats import gaussian_kde
 
 
 spark = SparkSession \
@@ -1650,4 +1652,756 @@ extract_and_visualize_regressor_coefficients_with_ci(
 )
 
 
+#%% artist similarity trends
+def analyze_artist_similarity_trends_pandas(cluster_data, sample_size=0.1, distance_type='internal'):
+    """
+    Analyze artist similarity trends using pandas sampling approach
+    
+    Args:
+        cluster_data: PySpark DataFrame with features and metadata
+        sample_size: Fraction of artists to sample (default 0.1)
+        distance_type: Type of similarity to calculate ('internal', 'historical', or 'between')
+    """
+    # Get list of unique artists and sample
+    unique_artists = cluster_data.select('artist').distinct()
+    sampled_artists = unique_artists.sample(withReplacement=False, fraction=sample_size)
+    
+    # Filter data for sampled artists and convert to pandas
+    pdf = cluster_data.join(sampled_artists, 'artist').toPandas()
+    
+    # Extract year from release_date
+    pdf['year'] = pd.to_datetime(pdf['release_date']).dt.year
+    
+    # Filter years
+    pdf = pdf[(pdf['year'] >= 1920) & (pdf['year'] <= 2020)]
+    
+    years = sorted(pdf['year'].unique())
+    similarity_by_year = {'year': [], 'avg_similarity': [], 'std_similarity': []}
+    historical_centroid = None
+    
+    for year in years:
+        year_data = pdf[pdf['year'] == year]
+        
+        if len(year_data) > 0:
+            if distance_type == 'internal':
+                # Calculate within-artist similarity
+                artist_similarities = []
+                for artist in year_data['artist'].unique():
+                    artist_songs = year_data[year_data['artist'] == artist]
+                    if len(artist_songs) > 1:
+                        artist_features = np.array([np.array(f) for f in artist_songs['features']])
+                        artist_centroid = artist_features.mean(axis=0)
+                        distances = np.sqrt(((artist_features - artist_centroid) ** 2).sum(axis=1))
+                        artist_similarities.extend(distances)
+                
+                if artist_similarities:
+                    similarity_by_year['year'].append(year)
+                    similarity_by_year['avg_similarity'].append(np.mean(artist_similarities))
+                    similarity_by_year['std_similarity'].append(np.std(artist_similarities))
+                    
+            elif distance_type == 'historical':
+                # Calculate historical similarity per artist
+                artist_similarities = []
+                for artist in year_data['artist'].unique():
+                    artist_data = pdf[pdf['artist'] == artist]
+                    artist_historical = artist_data[artist_data['year'] <= year]
+                    
+                    if not artist_historical.empty:
+                        if historical_centroid is None:
+                            historical_features = np.array([np.array(f) for f in artist_historical['features']])
+                            historical_centroid = historical_features.mean(axis=0)
+                            
+                        current_songs = artist_data[artist_data['year'] == year]
+                        current_features = np.array([np.array(f) for f in current_songs['features']])
+                        distances = np.sqrt(((current_features - historical_centroid) ** 2).sum(axis=1))
+                        artist_similarities.extend(distances)
+                        
+                        # Update historical centroid for this artist
+                        historical_features = np.array([np.array(f) for f in artist_historical['features']])
+                        historical_centroid = historical_features.mean(axis=0)
+                
+                if artist_similarities:
+                    similarity_by_year['year'].append(year)
+                    similarity_by_year['avg_similarity'].append(np.mean(artist_similarities))
+                    similarity_by_year['std_similarity'].append(np.std(artist_similarities))
+                
+            else:  # between artists
+                # Calculate between-artist similarity
+                artist_centroids = {}
+                for artist in year_data['artist'].unique():
+                    artist_songs = year_data[year_data['artist'] == artist]
+                    artist_features = np.array([np.array(f) for f in artist_songs['features']])
+                    artist_centroids[artist] = artist_features.mean(axis=0)
+                
+                if len(artist_centroids) > 1:
+                    # Calculate pairwise distances between centroids
+                    distances = []
+                    artists = list(artist_centroids.keys())
+                    for i in range(len(artists)):
+                        for j in range(i + 1, len(artists)):
+                            dist = np.sqrt(((artist_centroids[artists[i]] - artist_centroids[artists[j]]) ** 2).sum())
+                            distances.append(dist)
+                            
+                    similarity_by_year['year'].append(year)
+                    similarity_by_year['avg_similarity'].append(np.mean(distances))
+                    similarity_by_year['std_similarity'].append(np.std(distances))
+    
+    # Plot results
+    plt.figure(figsize=(10, 6))
+    data = pd.DataFrame(similarity_by_year)
+    plt.plot(data['year'], data['avg_similarity'], label=f'{distance_type.capitalize()} Similarity', marker='o')
+    plt.fill_between(
+        data['year'],
+        data['avg_similarity'] - data['std_similarity'],
+        data['avg_similarity'] + data['std_similarity'],
+        alpha=0.2
+    )
+    plt.xlabel('Year')
+    plt.ylabel('Similarity Score')
+    plt.title(f'{distance_type.capitalize()} Artist Similarity Over Time')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+analyze_artist_similarity_trends_pandas(cluster_results, sample_size=0.1, distance_type='internal')
+analyze_artist_similarity_trends_pandas(cluster_results, sample_size=0.1, distance_type='between')
+
+
+# %%
+# %% evolution of music (yearly distribution)
+def plot_yearly_distribution(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Plot the distribution of songs in PCA space for each year
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        grid_size: Number of grid cells in each dimension
+        seed: Random seed for sampling
+    """
+    # Sample and convert to pandas
+    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    
+    # Extract PCA coordinates and years
+    pca_coords = np.vstack(df['features'].values)
+    years = pd.to_datetime(df['release_date']).dt.year.values
+    
+    # Create grid for density estimation
+    x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
+    y_edges = np.linspace(pca_coords[:,1].min(), pca_coords[:,1].max(), grid_size)
+    
+    # Create figure with subplots
+    unique_years = sorted(np.unique(years))
+    n_years = len(unique_years)
+    n_cols = 5
+    n_rows = (n_years + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4*n_rows))
+    axes = axes.flatten()
+    
+    # Plot distribution for each year
+    for idx, year in enumerate(unique_years):
+        year_mask = years == year
+        year_coords = pca_coords[year_mask]
+        
+        if len(year_coords) > 0:
+            # Calculate 2D histogram
+            hist, _, _ = np.histogram2d(
+                year_coords[:,0], 
+                year_coords[:,1],
+                bins=[x_edges, y_edges]
+            )
+            
+            # Plot heatmap
+            im = axes[idx].imshow(
+                hist.T,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                cmap='viridis',
+                aspect='auto'
+            )
+            
+            axes[idx].set_title(f'Year: {year}')
+            axes[idx].set_xlabel('First Principal Component')
+            axes[idx].set_ylabel('Second Principal Component')
+    
+    # Remove empty subplots
+    for idx in range(n_years, len(axes)):
+        fig.delaxes(axes[idx])
+    
+    # Add colorbar
+    plt.colorbar(im, ax=axes, label='Number of Songs')
+    
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_yearly_distribution(cluster_results, sample_size=0.1)
+
+# %% animation
+def plot_yearly_distribution_animation(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        grid_size: Number of grid cells in each dimension
+        seed: Random seed for sampling
+    """
+    # Sample and convert to pandas
+    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    
+    # Extract PCA coordinates and years
+    pca_coords = np.vstack(df['features'].values)
+    years = pd.to_datetime(df['release_date']).dt.year.values
+    
+    # Create grid for density estimation
+    x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
+    y_edges = np.linspace(pca_coords[:,1].min(), pca_coords[:,1].max(), grid_size)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Create colorbar axes
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    
+    def update(frame):
+        ax.clear()
+        year = sorted(np.unique(years))[frame]
+        year_mask = years == year
+        year_coords = pca_coords[year_mask]
+        
+        if len(year_coords) > 0:
+            # Calculate 2D histogram
+            hist, _, _ = np.histogram2d(
+                year_coords[:,0], 
+                year_coords[:,1],
+                bins=[x_edges, y_edges]
+            )
+            
+            # Plot heatmap
+            im = ax.imshow(
+                hist.T,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                cmap='viridis',
+                aspect='auto'
+            )
+            
+            ax.set_title(f'Year: {year}')
+            ax.set_xlabel('First Principal Component')
+            ax.set_ylabel('Second Principal Component')
+            
+            # Update colorbar
+            if frame == 0:
+                cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+                cbar.ax.yaxis.label.set_color('white')
+                cbar.ax.tick_params(colors='white')
+    
+    # Create animation
+    unique_years = sorted(np.unique(years))
+    anim = animation.FuncAnimation(
+        fig, 
+        update,
+        frames=len(unique_years),
+        interval=100,  # 100ms between frames
+        repeat=True
+    )
+    
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+    plt.tight_layout()
+    
+    # Save animation
+    anim.save('music_distribution_evolution.gif', writer='pillow')
+    plt.show()
+
+# Example usage
+plot_yearly_distribution_animation(cluster_results, sample_size=0.1)
+
+# %% pca animation
+def plot_pca_distribution_animation(cluster_data, sample_size=0.1, seed=42):
+    """
+    Create an animated plot showing the distribution of songs along PCA components over time
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+    """
+    from scipy.stats import gaussian_kde
+    
+    try:
+        # Sample and convert to pandas
+        _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+        
+        # Extract PCA coordinates and years
+        pca_coords = np.vstack(df['features'].values)
+        years = pd.to_datetime(df['release_date']).dt.year.values
+        
+        # Create figure with two subplots for each component
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        fig.suptitle('Distribution of Songs Along Principal Components', fontsize=14)
+        
+        # Set up plot elements
+        line1, = ax1.plot([], [], lw=2)
+        line2, = ax2.plot([], [], lw=2)
+        
+        # Set axis labels
+        ax1.set_xlabel('First Principal Component')
+        ax1.set_ylabel('Density')
+        ax2.set_xlabel('Second Principal Component')
+        ax2.set_ylabel('Density')
+        
+        # Set axis limits based on data
+        x1_min, x1_max = pca_coords[:,0].min(), pca_coords[:,0].max()
+        x2_min, x2_max = pca_coords[:,1].min(), pca_coords[:,1].max()
+        
+        ax1.set_xlim(x1_min, x1_max)
+        ax2.set_xlim(x2_min, x2_max)
+        
+        # Calculate max density across all years to set fixed y limits
+        max_density1 = 0
+        max_density2 = 0
+        for year in np.unique(years):
+            year_mask = years == year
+            year_coords = pca_coords[year_mask]
+            if len(year_coords) > 0:
+                kde1 = gaussian_kde(year_coords[:,0])
+                kde2 = gaussian_kde(year_coords[:,1])
+                x1 = np.linspace(x1_min, x1_max, 200)
+                x2 = np.linspace(x2_min, x2_max, 200)
+                max_density1 = max(max_density1, max(kde1(x1)))
+                max_density2 = max(max_density2, max(kde2(x2)))
+        
+        # Set fixed y limits
+        ax1.set_ylim(0, max_density1 * 1.1)
+        ax2.set_ylim(0, max_density2 * 1.1)
+        
+        # Add year text
+        year_text = fig.text(0.02, 0.98, '', fontsize=12)
+        
+        def init():
+            line1.set_data([], [])
+            line2.set_data([], [])
+            return line1, line2
+        
+        def update(frame):
+            year = sorted(np.unique(years))[frame]
+            year_mask = years == year
+            year_coords = pca_coords[year_mask]
+            
+            if len(year_coords) > 0:
+                # Calculate KDE for first component
+                kde1 = gaussian_kde(year_coords[:,0])
+                x1 = np.linspace(x1_min, x1_max, 200)
+                y1 = kde1(x1)
+                line1.set_data(x1, y1)
+                
+                # Calculate KDE for second component
+                kde2 = gaussian_kde(year_coords[:,1])
+                x2 = np.linspace(x2_min, x2_max, 200)
+                y2 = kde2(x2)
+                line2.set_data(x2, y2)
+                
+                # Update year text
+                year_text.set_text(f'Year: {year}')
+            
+            return line1, line2
+        
+        # Create animation
+        anim = animation.FuncAnimation(
+            fig, 
+            update,
+            init_func=init,
+            frames=len(np.unique(years)),
+            interval=100,
+            blit=True,
+            repeat=True
+        )
+        
+        plt.tight_layout()
+        
+        # Save animation
+        anim.save('pca_distribution_evolution.gif', writer='pillow')
+        plt.show()
+    except Exception as e:
+        print(f"Error creating PCA distribution animation: {e}")
+
+# Example usage
+plot_pca_distribution_animation(cluster_results, sample_size=0.1)
+
+# %% pca animation 5 year
+def plot_pca_distribution_animation(cluster_data, sample_size=0.1, seed=42, year_window=5):
+    """
+    Create an animated plot showing the distribution of songs along PCA components over time,
+    averaged over 5-year windows
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        seed: Random seed for sampling
+        year_window: Size of year window for averaging (default 5)
+    """
+    from scipy.stats import gaussian_kde
+    
+    try:
+        # Sample and convert to pandas
+        _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+        
+        # Extract PCA coordinates and years
+        pca_coords = np.vstack(df['features'].values)
+        years = pd.to_datetime(df['release_date']).dt.year.values
+        
+        # Create year bins
+        min_year = (years.min() // year_window) * year_window
+        max_year = ((years.max() // year_window) + 1) * year_window
+        year_bins = np.arange(min_year, max_year + year_window, year_window)
+        
+        # Create figure with two subplots for each component
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        fig.suptitle('Distribution of Songs Along Principal Components (5-Year Averages)', fontsize=14)
+        
+        # Set up plot elements
+        line1, = ax1.plot([], [], lw=2)
+        line2, = ax2.plot([], [], lw=2)
+        
+        # Set axis labels
+        ax1.set_xlabel('First Principal Component')
+        ax1.set_ylabel('Density')
+        ax2.set_xlabel('Second Principal Component')
+        ax2.set_ylabel('Density')
+        
+        # Set axis limits based on data
+        x1_min, x1_max = pca_coords[:,0].min(), pca_coords[:,0].max()
+        x2_min, x2_max = pca_coords[:,1].min(), pca_coords[:,1].max()
+        
+        ax1.set_xlim(x1_min, x1_max)
+        ax2.set_xlim(x2_min, x2_max)
+        
+        # Calculate max density across all year windows to set fixed y limits
+        max_density1 = 0
+        max_density2 = 0
+        for start_year in year_bins[:-1]:
+            year_mask = (years >= start_year) & (years < start_year + year_window)
+            year_coords = pca_coords[year_mask]
+            if len(year_coords) > 0:
+                kde1 = gaussian_kde(year_coords[:,0])
+                kde2 = gaussian_kde(year_coords[:,1])
+                x1 = np.linspace(x1_min, x1_max, 200)
+                x2 = np.linspace(x2_min, x2_max, 200)
+                max_density1 = max(max_density1, max(kde1(x1)))
+                max_density2 = max(max_density2, max(kde2(x2)))
+        
+        # Set fixed y limits
+        ax1.set_ylim(0, max_density1 * 1.1)
+        ax2.set_ylim(0, max_density2 * 1.1)
+        
+        # Add year range text
+        year_text = fig.text(0.02, 0.98, '', fontsize=12)
+        
+        def init():
+            line1.set_data([], [])
+            line2.set_data([], [])
+            return line1, line2
+        
+        def update(frame):
+            start_year = year_bins[frame]
+            year_mask = (years >= start_year) & (years < start_year + year_window)
+            year_coords = pca_coords[year_mask]
+            
+            if len(year_coords) > 0:
+                # Calculate KDE for first component
+                kde1 = gaussian_kde(year_coords[:,0])
+                x1 = np.linspace(x1_min, x1_max, 200)
+                y1 = kde1(x1)
+                line1.set_data(x1, y1)
+                
+                # Calculate KDE for second component
+                kde2 = gaussian_kde(year_coords[:,1])
+                x2 = np.linspace(x2_min, x2_max, 200)
+                y2 = kde2(x2)
+                line2.set_data(x2, y2)
+                
+                # Update year text
+                year_text.set_text(f'Years: {start_year}-{start_year + year_window - 1}')
+            
+            return line1, line2
+        
+        # Create animation
+        anim = animation.FuncAnimation(
+            fig, 
+            update,
+            init_func=init,
+            frames=len(year_bins)-1,
+            interval=80,  # Increased interval for better viewing
+            blit=True,
+            repeat=True
+        )
+        
+        plt.tight_layout()
+        
+        # Save animation
+        anim.save('pca_distribution_evolution_5year.gif', writer='pillow')
+        plt.show()
+    except Exception as e:
+        print(f"Error creating PCA distribution animation: {e}")
+
+# Example usage
+plot_pca_distribution_animation(cluster_results, sample_size=0.1)
+
+
+# %% centroid
+from pyspark.sql import functions as F
+from pyspark.ml.functions import vector_to_array
+from pyspark.sql.types import DoubleType, ArrayType
+
+def compute_centroid_from_vector(df, feature_col='features'):
+    """
+    Compute the centroid of the features vector column.
+
+    Args:
+        df: Input DataFrame containing a 'features' column of type Vector.
+        feature_col: Name of the vector column.
+
+    Returns:
+        A list representing the centroid vector.
+    """
+    # Step 1: Convert vector to array
+    df_with_array = df.withColumn('features_array', vector_to_array(F.col(feature_col)))
+    
+    # Step 2: Get the number of dimensions in the vector
+    num_features = df_with_array.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    # Step 3: Extract each dimension into a separate column
+    for i in range(num_features):
+        df_with_array = df_with_array.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Step 4: Compute the average for each dimension
+    avg_features = df_with_array.agg(
+        *[F.avg(F.col(f'feature_{i}')).alias(f'feature_{i}') for i in range(num_features)]
+    ).collect()[0]
+    
+    # Step 5: Convert back to a list or Vector (optional)
+    centroid = [avg_features[f'feature_{i}'] for i in range(num_features)]
+    
+    return centroid
+
+# 示例用法
+centroid = compute_centroid_from_vector(cluster_results, feature_col='features')
+print("Centroid:", centroid)
+
+
+
+
+# %% similarity trends
+
+# similarity between and within artists
+from pyspark.sql import functions as F
+from pyspark.ml.functions import vector_to_array
+import matplotlib.pyplot as plt
+import pandas as pd
+def calculate_yearly_dispersion(cluster_data, sample_size=0.1, seed=42):
+    """
+    Calculate yearly dispersion of songs from their centroids in PCA space
+    
+    Args:
+        cluster_data: PySpark DataFrame with features and metadata
+        sample_size: Fraction of songs to sample (default 0.1)
+        seed: Random seed for sampling
+    
+    Returns:
+        Pandas DataFrame with yearly dispersion metrics
+    """
+    # Sample data
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Extract year from release_date
+    sampled_data = sampled_data.withColumn(
+        'year',
+        F.year(F.to_timestamp('release_date'))
+    )
+    
+    # Convert features to array
+    sampled_data = sampled_data.withColumn('features_array', vector_to_array(F.col('features')))
+    
+    # Get number of dimensions
+    num_features = sampled_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    # Extract each dimension into separate columns
+    for i in range(num_features):
+        sampled_data = sampled_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Calculate yearly centroids
+    yearly_centroids = sampled_data.groupBy('year').agg(
+        *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+    )
+    
+    # Join centroids back to main data
+    data_with_centroids = sampled_data.join(yearly_centroids, on='year')
+    
+    # Calculate distances to centroids
+    distance_calc = '+'.join([f'pow(feature_{i} - centroid_{i}, 2)' for i in range(num_features)])
+    data_with_distances = data_with_centroids.withColumn(
+        'distance_to_centroid',
+        F.sqrt(F.expr(distance_calc))
+    )
+    
+    # Calculate yearly statistics
+    yearly_stats = data_with_distances.groupBy('year').agg(
+        F.avg('distance_to_centroid').alias('avg_distance'),
+        F.stddev('distance_to_centroid').alias('std_distance'),
+        F.expr('stddev(distance_to_centroid) / sqrt(count(*))').alias('se_distance'),
+        F.count('*').alias('song_count')
+    )
+    
+    # Convert to pandas for visualization
+    yearly_stats_pd = yearly_stats.toPandas()
+    yearly_stats_pd = yearly_stats_pd.sort_values('year')
+    
+    return yearly_stats_pd
+
+def compute_artist_similarity(cluster_data, distance_type='within', sample_size=0.1, seed=42):
+    """
+    Compute artist-level similarity based on the features vector.
+
+    Args:
+        cluster_data: PySpark DataFrame with features and metadata.
+        distance_type: Type of similarity to compute ('within' or 'between').
+        sample_size: Fraction of data to sample for efficiency (default 0.1).
+        seed: Random seed for sampling (default 42).
+
+    Returns:
+        Pandas DataFrame with similarity metrics over time.
+    """
+    # Step 1: Sample data
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Step 2: Extract year from release_date
+    sampled_data = sampled_data.withColumn(
+        'year',
+        F.year(F.to_timestamp('release_date'))
+    )
+    
+    # Step 3: Convert features to array
+    sampled_data = sampled_data.withColumn('features_array', vector_to_array(F.col('features')))
+    
+    # Step 4: Determine number of dimensions
+    num_features = sampled_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    
+    # Step 5: Extract each feature dimension into separate columns
+    for i in range(num_features):
+        sampled_data = sampled_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    if distance_type == 'within':
+        # Step 6a: Calculate centroids for each artist-year
+        artist_centroids = sampled_data.groupBy('artist', 'year').agg(
+            *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+        )
+        
+        # Step 7a: Join centroids back to original data
+        data_with_centroids = sampled_data.join(artist_centroids, on=['artist', 'year'])
+        
+        # Step 8a: Compute distances to centroids
+        distance_calc = '+'.join([f'pow(feature_{i} - centroid_{i}, 2)' for i in range(num_features)])
+        data_with_distances = data_with_centroids.withColumn(
+            'distance_to_centroid',
+            F.sqrt(F.expr(distance_calc))
+        )
+        
+        # Step 9a: Calculate within-artist similarity per year
+        yearly_stats = data_with_distances.groupBy('year').agg(
+            F.avg('distance_to_centroid').alias('avg_distance'),
+            F.stddev('distance_to_centroid').alias('std_distance'),
+            F.expr('stddev(distance_to_centroid) / sqrt(count(*))').alias('se_distance'),
+            F.count('*').alias('song_count')
+        )
+        
+    elif distance_type == 'between':
+        # Step 6b: Calculate centroids for each artist-year
+        artist_centroids = sampled_data.groupBy('artist', 'year').agg(
+            *[F.avg(F.col(f'feature_{i}')).alias(f'centroid_{i}') for i in range(num_features)]
+        )
+        
+        # Step 7b: Calculate yearly centroids across all artists
+        yearly_centroids = artist_centroids.groupBy('year').agg(
+            *[F.avg(F.col(f'centroid_{i}')).alias(f'global_centroid_{i}') for i in range(num_features)]
+        )
+        
+        # Step 8b: Join yearly centroids to artist centroids
+        data_with_centroids = artist_centroids.join(yearly_centroids, on='year')
+        
+        # Step 9b: Compute distances between artist centroids and global centroid
+        distance_calc = '+'.join([f'pow(centroid_{i} - global_centroid_{i}, 2)' for i in range(num_features)])
+        data_with_distances = data_with_centroids.withColumn(
+            'distance_to_centroid',
+            F.sqrt(F.expr(distance_calc))
+        )
+        
+        # Step 10b: Calculate between-artist similarity per year
+        yearly_stats = data_with_distances.groupBy('year').agg(
+            F.avg('distance_to_centroid').alias('avg_distance'),
+            F.stddev('distance_to_centroid').alias('std_distance'),
+            F.expr('stddev(distance_to_centroid) / sqrt(count(*))').alias('se_distance'),
+            F.count('*').alias('artist_count')
+        )
+    
+    # Convert to Pandas DataFrame for visualization
+    yearly_stats_pd = yearly_stats.toPandas().sort_values('year')
+    
+    return yearly_stats_pd
+
+# Example usage
+yearly_dispersion = calculate_yearly_dispersion(cluster_results, sample_size=0.9)
+within_similarity = compute_artist_similarity(cluster_results, distance_type='within', sample_size=0.9)
+between_similarity = compute_artist_similarity(cluster_results, distance_type='between', sample_size=0.9)
+
+#%% visualize similarity trends
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+def visualize_similarity_trends(data, distance_type='within'):
+    """
+    Visualize similarity trends with shaded error regions.
+
+    Args:
+        data: Pandas DataFrame containing yearly similarity metrics.
+        distance_type: Type of similarity ('within' or 'between').
+    """
+    # Extract relevant columns
+    metric = 'avg_distance' 
+    std_metric = 'se_distance' 
+    
+    # Plot settings
+    plt.figure(figsize=(12, 6))
+    
+    # Plot main line
+    plt.plot(data['year'], data[metric], 'o-', markersize=5, 
+             label=f'{distance_type.capitalize()}')
+    
+    # Add shaded error region
+    lower_bound = np.maximum(0, data[metric] - data[std_metric])  # Ensure lower bound doesn't go below 0
+    upper_bound = data[metric] + data[std_metric]
+    plt.fill_between(data['year'], lower_bound, upper_bound, alpha=0.3)
+    
+    # Set y-axis limit to start at 0
+    plt.ylim(bottom=0)
+    
+    # Add grid, labels, and legend
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Year')
+    plt.ylabel('Average Distance')
+    plt.title(f'{distance_type.capitalize()} Innovation Over Time')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+visualize_similarity_trends(within_similarity, distance_type='within-artist')
+visualize_similarity_trends(between_similarity, distance_type='between-artist')
+visualize_similarity_trends(yearly_dispersion, distance_type='yearly')
 # %%
