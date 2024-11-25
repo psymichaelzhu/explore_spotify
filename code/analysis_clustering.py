@@ -1472,10 +1472,14 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             'y': results_df[range_name]
         })
         
+
         # Add regressors for streaming events
         for event_year in events:
             df[f'year_since_{event_year}'] = (df['ds'].dt.year - event_year).clip(lower=0)
             df[f'streaming_{event_year}'] = (df['ds'] >= f'{event_year}-01-01').astype(int)
+        
+        # Split into train and test sets
+        train_df, test_df = utils.prepare_data(df, test_size=0.2, random_state=seed)
         
         # Step 4: Initialize Prophet model
         model = Prophet(
@@ -1503,22 +1507,25 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             model.add_regressor(f'streaming_{event_year}',prior_scale=20)
             model.add_regressor(f'year_since_{event_year}',prior_scale=10)
         
-        # Step 5: Fit the model
-        model.fit(df)
+        # Step 5: Fit the model on training data
+        model.fit(train_df)
         
-        # Step 6: Make future predictions
+        # Step 6: Make predictions on test data and future
         future = model.make_future_dataframe(periods=forecast_years, freq='Y')
         for event_year in events:
             future[f'year_since_{event_year}'] = (future['ds'].dt.year - event_year).clip(lower=0)
             future[f'streaming_{event_year}'] = (future['ds'] >= f'{event_year}-01-01').astype(int)
         
         forecast = model.predict(future)
+        test_forecast = model.predict(test_df)
         
         # Step 7: Store results
         prophet_results[range_name] = {
             'model': model,
             'forecast': forecast,
-            'actual': df
+            'train': train_df,
+            'test': test_df,
+            'test_forecast': test_forecast
         }
         
         # Step 8: Visualization
@@ -1568,7 +1575,7 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
 prophet_results = time_series_analysis(
     cluster_results, 
     distance_type='historical',#historical, internal
-    sample_size=0.1,
+    sample_size=0.001,
     bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
     forecast_years=0,
     cycle_years=40,#40
