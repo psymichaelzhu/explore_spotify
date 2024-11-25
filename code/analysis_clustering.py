@@ -275,7 +275,7 @@ optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = f
 components_df = analyze_pca_composition(model_pca, feature_cols)
 # 2. KMeans: find optimal k, based on PCA-transformed features
 features_pca.persist()
-optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca)
+optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 4))
 
 
 #%% merge cluster results
@@ -294,10 +294,32 @@ cluster_counts.show()
 small_clusters = cluster_counts.filter(F.col("count") < 100000).select("prediction").rdd.flatMap(lambda x: x).collect()
 cluster_results = merged_results.filter(~F.col("prediction").isin(small_clusters))
 
-# Show remaining cluster distribution
+# filter out songs before 1920 and after 2020
+cluster_results = cluster_results.filter(F.year(F.to_timestamp('release_date')).between(1920, 2020))
+
+# old cluster distribution
 cluster_results.groupby('prediction') \
-               .count() \
-               .show()
+              .count() \
+              .orderBy('prediction') \
+              .show()
+'''
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+
+# get distinct cluster IDs and sort
+distinct_clusters = cluster_results.select("prediction").distinct().orderBy("prediction")
+
+# create new cluster IDs
+window_spec = Window.orderBy("prediction")
+renumbered_clusters = distinct_clusters.withColumn("new_prediction", F.row_number().over(window_spec) - 1)
+
+# map back to original data
+cluster_results = cluster_results.join(
+    renumbered_clusters, on="prediction", how="left"
+).drop("prediction").withColumnRenamed("new_prediction", "prediction")
+'''
+
+
 
 
 #%% visualization functions
@@ -757,6 +779,7 @@ def plot_distance_distribution(cluster_data, artist_name=None, sample_size=0.1, 
             # Calculate distances to current centroid
             current_distances = np.sqrt(
                 np.sum((current_points - current_centroid) ** 2, axis=1))
+            )
             current_distances_by_year[year] = current_distances
             
             # Calculate distances to historical centroid if available
@@ -1739,7 +1762,7 @@ def analyze_artist_similarity_trends_pandas(cluster_data, sample_size=0.1, dista
                     artists = list(artist_centroids.keys())
                     for i in range(len(artists)):
                         for j in range(i + 1, len(artists)):
-                            dist = np.sqrt(((artist_centroids[artists[i]] - artist_centroids[artists[j]]) ** 2).sum())
+                            dist = np.sqrt(((artist_centroids[artists[i]] - artist_centroids[artists[j]]) ** 2).sum()
                             distances.append(dist)
                             
                     similarity_by_year['year'].append(year)
@@ -2198,7 +2221,6 @@ print("Centroid:", centroid)
 
 
 # %% similarity trends
-
 # similarity between and within artists
 from pyspark.sql import functions as F
 from pyspark.ml.functions import vector_to_array
@@ -2353,6 +2375,7 @@ def compute_artist_similarity(cluster_data, distance_type='within', sample_size=
     yearly_stats_pd = yearly_stats.toPandas().sort_values('year')
     
     return yearly_stats_pd
+
 
 # Example usage
 yearly_dispersion = calculate_yearly_dispersion(cluster_results, sample_size=0.9)
