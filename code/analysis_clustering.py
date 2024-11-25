@@ -1276,7 +1276,7 @@ plot_music_trends(cluster_results, sample_size=0.1, window_size=14, milestone_ye
 #%%
 
 
-# %% time series analysis
+# %% time series analysis: train a model and cross-validate
 def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=None,
                                    bins=[0, 100], distance_type='historical',
                                    forecast_years=0, cycle_years=40, holidays=['1966-01-01', '1993-01-01']):
@@ -1329,13 +1329,13 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
         
         # Step 4: Initialize Prophet model
         model = Prophet(
-            mcmc_samples=300,
+            mcmc_samples=200,
             yearly_seasonality=False,
             weekly_seasonality=False,
             daily_seasonality=False,
             holidays=holidays_df,
             seasonality_mode='additive',
-            changepoint_prior_scale=0.1,
+            changepoint_prior_scale=0.001,
             holidays_prior_scale=10.0,
         )
         
@@ -1344,11 +1344,11 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
             name='long_cycle',
             period=cycle_years * 365.25,
             fourier_order=3,
-            prior_scale=3.0
+            prior_scale=1.0
         )
         
         # Add regressors for intercept and slope changes
-        model.add_regressor('streaming', prior_scale=20.0)
+        model.add_regressor('streaming', prior_scale=10.0)
         model.add_regressor('year_since_streaming', prior_scale=10.0)
         
         # Step 5: Fit the model
@@ -1411,19 +1411,6 @@ def time_series_analysis(cluster_data, artist_name=None, sample_size=0.1, seed=N
     
     return prophet_results
 
-# Example usage:
-prophet_results = time_series_analysis(
-    cluster_results, 
-    distance_type='historical',#historical, internal
-    sample_size=0.1,
-    bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
-    forecast_years=0,
-    cycle_years=40,
-    holidays=['1966-01-01', '1993-01-01']
-)
-# %%
-print(prophet_results)
-# %%
 def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
     """
     Visualize the fit of Prophet models and create joint plots of predicted vs observed data.
@@ -1448,7 +1435,7 @@ def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
         forecast = result['forecast']
         actual = result['actual']
         
-        # Merge forecast and actual data for comparison
+        # Merge forecast and actual data for comparison˛
         merged = forecast[['ds', 'yhat']].merge(actual[['ds', 'y']], on='ds', how='inner')
         
         # Compute residuals
@@ -1478,7 +1465,7 @@ def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
 
         # Plot residuals
         plt.figure(figsize=figsize)
-        sns.histplot(merged['residual'], kde=True, bins=30, color='skyblue')
+        sns.histplot(merged['residual'], kde=True, bins=30, color='#3C76AF')
         plt.title(f"Residual Distribution for Range: {range_name}", fontsize=14)
         plt.xlabel("Residuals (Observed - Predicted)")
         plt.ylabel("Frequency")
@@ -1487,13 +1474,13 @@ def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
 
         # Plot time series fit
         plt.figure(figsize=figsize)
-        plt.plot(actual['ds'], actual['y'], label='Observed', color='blue')
-        plt.plot(forecast['ds'], forecast['yhat'], label='Predicted', color='orange')
+        plt.scatter(actual['ds'], actual['y'], label='Observed', color='black',alpha=0.8, s=20)
+        plt.plot(forecast['ds'], forecast['yhat'], label='Predicted', color='#3C76AF',linewidth=2)
         plt.fill_between(
             forecast['ds'],
             forecast['yhat_lower'],
             forecast['yhat_upper'],
-            color='orange', alpha=0.2, label='Prediction Interval'
+            color='#3a76AF', alpha=0.2, label='Prediction Interval'
         )
         plt.title(f"Time Series Fit for Range: {range_name}", fontsize=14)
         plt.xlabel("Date")
@@ -1501,7 +1488,193 @@ def visualize_fit_and_jointplot(prophet_results, bins=None, figsize=(10, 8)):
         plt.legend()
         plt.tight_layout()
         plt.show()
-        print(model.params)
+
+def generate_new_df(prophet_results, cluster_data, artist_name=None, sample_size=0.1, seed=None,
+                                   bins=[0, 100], distance_type='historical',
+                                   forecast_years=0, cycle_years=40, holidays=['1966-01-01', '1993-01-01']):
+    """
+    Analyze innovation levels using Prophet with holidays and custom regressors for streaming periods.
+    
+    Args:
+        cluster_data: DataFrame with cluster predictions and features.
+        artist_name: Optional artist name to filter data.
+        sample_size: Fraction of data to sample.
+        seed: Random seed for sampling.
+        bins: Innovation level ranges.
+        distance_type: Type of distance to calculate ('historical' or 'internal').
+        forecast_years: Number of years to forecast.
+        cycle_years: Length of cycle in years for custom seasonality.
+        holidays: List of dates for holidays or special events.
+    """
+    import copy
+    # Step 1: Prepare innovation data
+    results_df = plot_innovation_levels_over_time(
+        cluster_data, artist_name, sample_size, seed, bins, distance_type
+    )
+    bin_ranges = [f"{bins[i]:.1f}-{bins[i+1]:.1f}" for i in range(len(bins) - 1)]
+    new_results = copy.deepcopy(prophet_results)
+    for range_name in bin_ranges:
+        # Step 3: Create DataFrame for Prophet
+        df = pd.DataFrame({
+            'ds': pd.to_datetime(results_df.index.astype(str) + '-01-01'),
+            'y': results_df[range_name]
+        })
+        
+        # Add regressors for streaming events
+        df['year_since_streaming'] = (df['ds'].dt.year - 1999).clip(lower=0)
+        df['streaming'] = (df['ds'] >= '1999-01-01').astype(int)
+        
+        new_results[range_name]['actual'] = df
+
+    
+    return new_results
+
+
+#%% cross-validation
+splits = cluster_results.randomSplit([0.5, 0.5], seed=42)
+cluster_results_1 = splits[0]
+cluster_results_2 = splits[1]
+sample_size = 0.01
+
+prophet_results = time_series_analysis(
+    cluster_results_1, 
+    distance_type='historical',#historical, internal
+    sample_size=sample_size,
+    bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
+    forecast_years=0,
+    cycle_years=40,
+    holidays=['1966-01-01', '1993-01-01']
+)
+new_results = generate_new_df(
+    prophet_results, 
+    cluster_results_2, 
+    distance_type='historical',#historical, internal
+    sample_size=sample_size,
+    bins=[0,2,100],#0,0.5,1, 1.5, 2, 2.5, 100
+    forecast_years=0,
+    cycle_years=40,
+    holidays=['1966-01-01', '1993-01-01']
+)
+visualize_fit_and_jointplot(prophet_results, bins=["2.0-100.0","0.0-2.0"])
+visualize_fit_and_jointplot(new_results, bins=["2.0-100.0","0.0-2.0"])
+
+# Extract actual values from both results for 2.0-100.0
+actual_values_1_high = prophet_results["2.0-100.0"]["actual"]
+actual_values_2_high = new_results["2.0-100.0"]["actual"]
+
+# Extract actual values for 0.0-2.0
+actual_values_1_low = prophet_results["0.0-2.0"]["actual"]
+actual_values_2_low = new_results["0.0-2.0"]["actual"]
+
+# Create figure with subplots
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+
+# Plot 2.0-100.0 range
+ax1.plot(actual_values_1_high['ds'], actual_values_1_high['y'], label='Training Set', marker='o')
+ax1.plot(actual_values_2_high['ds'], actual_values_2_high['y'], label='Test Set', marker='o')
+ax1.set_title('Comparison of Training and Test Sets (2.0-100.0)')
+ax1.set_xlabel('Year')
+ax1.set_ylabel('Value')
+ax1.legend()
+ax1.grid(True)
+
+# Plot 0.0-2.0 range
+ax2.plot(actual_values_1_low['ds'], actual_values_1_low['y'], label='Training Set', marker='o')
+ax2.plot(actual_values_2_low['ds'], actual_values_2_low['y'], label='Test Set', marker='o')
+ax2.set_title('Comparison of Training and Test Sets (0.0-2.0)')
+ax2.set_xlabel('Year')
+ax2.set_ylabel('Value')
+ax2.legend()
+ax2.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+
+
+
 # %%
-visualize_fit_and_jointplot(prophet_results, bins=["0.0-2.0", "2.0-100.0"])
+import numpy as np
+from prophet.utilities import regressor_coefficients
+
+def extract_and_visualize_regressor_coefficients_with_hdi(prophet_results, regressors, bins=None):
+    """
+    Extract and visualize regressor coefficients with 95% HDI from Prophet models.
+    
+    Args:
+        prophet_results: Dictionary containing Prophet models and results.
+        regressors: List of regressors to analyze.
+        bins: Optional list of range names to include in the analysis.
+    """
+    coefficients = []
+
+    for range_name, result in prophet_results.items():
+        if bins and range_name not in bins:
+            continue
+
+        # Extract coefficients and credible intervals
+        model = result['model']
+        regressor_data = regressor_coefficients(model)
+        print(range_name)
+        print(regressor_data)
+
+        # Check if MCMC samples are available for credible intervals
+        if 'coef' in regressor_data.columns:
+            for _, row in regressor_data.iterrows():
+                if row['regressor'] in regressors:
+                    # Calculate 95% HDI from MCMC samples
+                    if model.mcmc_samples:
+                        regressor_index = list(model.extra_regressors.keys()).index(row['regressor'])
+                        mcmc_samples = model.params['beta'][:, regressor_index]
+                        lower_bound = np.percentile(mcmc_samples, 2.5)
+                        upper_bound = np.percentile(mcmc_samples, 97.5)
+                    else:
+                        lower_bound, upper_bound = np.nan, np.nan
+
+                    coefficients.append({
+                        'range': range_name,
+                        'regressor': row['regressor'],
+                        'beta': row['coef'],
+                        'lower_bound': lower_bound,
+                        'upper_bound': upper_bound
+                    })
+
+    coefficients_df = pd.DataFrame(coefficients)
+
+    # Visualization
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    sns.set(style="whitegrid")
+    plt.figure(figsize=(10, 6))
+    sns.pointplot(
+        data=coefficients_df,
+        x='range', y='beta', hue='regressor',
+        dodge=True, join=False, palette="muted",
+        markers=["o", "s"], ci=None
+    )
+
+    # Add credible intervals as error bars
+    for i, row in coefficients_df.iterrows():
+        plt.plot(
+            [i, i],
+            [row['lower_bound'], row['upper_bound']],
+            color='gray', alpha=0.7, linestyle="--"
+        )
+
+    plt.axhline(0, color='black', linestyle='--', linewidth=1, label="Zero Line")
+    plt.title("Regressor Coefficients with Credible Intervals")
+    plt.xlabel("Range")
+    plt.ylabel("Coefficient Value")
+    plt.legend(title="Regressor")
+    plt.tight_layout()
+    plt.show()
+
+# Example Usage
+extract_and_visualize_regressor_coefficients_with_hdi(
+    prophet_results,
+    regressors=['streaming', 'year_since_streaming'],
+    bins=["2.0-100.0", "0.0-2.0"]
+)
+
 # %%
