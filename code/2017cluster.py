@@ -511,16 +511,18 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from kneed import KneeLocator
 
-def visualize_hierarchical_clusters(raw_features, linkage_method="ward", n_clusters=3, sample_size=0.01):
+def visualize_hierarchical_clusters(raw_features, linkage_method="ward", sample_size=0.01, n_clusters=None, fcluster_criterion='distance'):
     """
     Perform Hierarchical Clustering and visualize results using PCA components.
+    Automatically determine optimal number of clusters using elbow method if n_clusters is not specified.
     
     Args:
         raw_features: Spark DataFrame with PCA features
         linkage_method: Linkage method for hierarchical clustering ("ward", "complete", "average", "single")
-        n_clusters: Number of clusters to form
         sample_size: Fraction of data to sample for visualization
+        n_clusters: Number of clusters to form. If None, will determine automatically
     
     Returns:
         None (displays dendrogram and scatter plot)
@@ -554,17 +556,52 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", n_clust
         
         # Perform hierarchical clustering
         Z = linkage(X, method=linkage_method)  # Compute the linkage matrix
-        cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')  # Form flat clusters
+        
+        if n_clusters is None:
+            # Find optimal number of clusters using distance differences
+            last_distances = Z[:, 2]
+            distance_diffs = np.diff(last_distances)
+            max_diff_idx = np.argmax(distance_diffs)
+            optimal_clusters = len(X) - max_diff_idx
+            print(f"Optimal number of clusters based on maximum distance difference: {optimal_clusters}")
+            n_clusters = optimal_clusters
+        else:
+            print(f"Using specified number of clusters: {n_clusters}")
+            
+        # Form clusters using optimal/specified number
+        if fcluster_criterion == 'maxclust':
+            cluster_labels = fcluster(Z, t=n_clusters, criterion=fcluster_criterion)
+        else:
+            # For 'distance' and 'inconsistent' criteria, we need to find appropriate threshold
+            # that gives us the desired number of clusters
+            max_d = Z[:, 2].max()
+            for t in np.linspace(0, max_d, 100):
+                cluster_labels = fcluster(Z, t=t, criterion=fcluster_criterion)
+                if len(np.unique(cluster_labels)) == n_clusters:
+                    break
         
         # Add cluster labels to the dataframe
         pandas_df['cluster'] = cluster_labels
         
-        # Visualize dendrogram (optional)
-        plt.figure(figsize=(10, 6))
+        # Visualize dendrogram with distance differences
+        plt.figure(figsize=(12, 8))
+        plt.subplot(2, 1, 1)
         dendrogram(Z, truncate_mode="lastp", p=20, leaf_rotation=90., leaf_font_size=10.)
         plt.title(f"Dendrogram ({linkage_method} linkage)")
         plt.xlabel("Sample index")
         plt.ylabel("Distance")
+        
+        # Plot distance differences
+        plt.subplot(2, 1, 2)
+        distance_diffs = np.diff(Z[:, 2])
+        plt.plot(range(len(distance_diffs)), distance_diffs, 'b-')
+        plt.axvline(x=max_diff_idx, color='r', linestyle='--', 
+                   label=f'Maximum difference at {max_diff_idx}\nOptimal clusters: {optimal_clusters}')
+        plt.title("Distance Differences Between Merges")
+        plt.xlabel("Merge Step")
+        plt.ylabel("Distance Difference")
+        plt.legend()
+        plt.tight_layout()
         plt.show()
         
         # Visualize clusters in 2D space
@@ -580,7 +617,7 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", n_clust
         plt.colorbar(scatter, label='Cluster')
         plt.xlabel('First Principal Component')
         plt.ylabel('Second Principal Component')
-        plt.title(f"Hierarchical Clustering Visualization ({linkage_method} linkage, {n_clusters} clusters)")
+        plt.title(f"Hierarchical Clustering Visualization\n({linkage_method} linkage, {n_clusters} clusters)")
         plt.grid(True, alpha=0.3)
         
         # Add legend for clusters
@@ -601,5 +638,108 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", n_clust
         # Clean up
         features.unpersist()
 
-visualize_hierarchical_clusters(filtered_features, linkage_method="ward", n_clusters=4, sample_size=0.01)
+#%%
+visualize_hierarchical_clusters(filtered_features, linkage_method="ward", sample_size=0.0001)
+visualize_hierarchical_clusters(filtered_features, linkage_method="ward", sample_size=0.0001, n_clusters=4)
+# %%
+def compare_clustering_methods(filtered_features, fcluster_criterion='distance', 
+                             linkage_methods=['ward', 'complete', 'average', 'single'],
+                             sample_size=0.0001, n_clusters=None):
+    """
+    Compare different linkage methods and fcluster criteria by running visualizations
+    and storing results for comparison.
+    
+    Args:
+        filtered_features: Input features for clustering
+        fcluster_criterion: Criterion for forming flat clusters ('inconsistent', 'distance', 'maxclust', etc.)
+        linkage_methods: List of linkage methods to try
+        sample_size: Sample size for visualization
+        n_clusters: Number of clusters (optional)
+    """
+    # Store results for comparison
+    results = []
+    
+    try:
+        for method in linkage_methods:
+            print(f"\nTesting linkage method: {method}")
+            
+            # Run visualization with current parameters
+            print(f"Running {method} method with {fcluster_criterion} criterion...")
+            visualize_hierarchical_clusters(
+                filtered_features, 
+                linkage_method=method,
+                sample_size=sample_size,
+                n_clusters=n_clusters,
+                fcluster_criterion=fcluster_criterion
+            )
+                
+    except Exception as e:
+        print(f"Error during comparison: {str(e)}")
+
+# Example usage with different criteria
+criteria = ['distance', 'maxclust', 'inconsistent']
+for criterion in criteria:
+    print(f"\nTesting with criterion: {criterion}")
+    compare_clustering_methods(
+        filtered_features,
+        fcluster_criterion=criterion,
+        sample_size=0.0001
+    )
+    
+    # Also test with specific number of clusters
+    compare_clustering_methods(
+        filtered_features,
+        fcluster_criterion=criterion,
+        sample_size=0.0001,
+        n_clusters=3
+    )
+
+
+# %%
+# %%
+def compare_clustering_methods(filtered_features, fcluster_criterion='maxclust', 
+                             linkage_methods=['ward', 'complete', 'average', 'single'],
+                             sample_size=0.0001, n_clusters=None):
+    """
+    Compare different linkage methods and fcluster criteria by running visualizations
+    and storing results for comparison.
+    
+    Args:
+        filtered_features: Input features for clustering
+        fcluster_criterion: Criterion for forming flat clusters ('inconsistent', 'distance', 'maxclust', etc.)
+        linkage_methods: List of linkage methods to try
+        sample_size: Sample size for visualization
+        n_clusters: Number of clusters (optional)
+    """
+    # Store results for comparison
+    results = []
+    
+    try:
+        for method in linkage_methods:
+            print(f"\nTesting linkage method: {method}")
+            
+            # Run visualization with current parameters
+            print(f"Running {method} method with {fcluster_criterion} criterion...")
+            visualize_hierarchical_clusters(
+                filtered_features, 
+                linkage_method=method,
+                sample_size=sample_size,
+                n_clusters=n_clusters,
+                fcluster_criterion=fcluster_criterion
+            )
+                
+    except Exception as e:
+        print(f"Error during comparison: {str(e)}")
+
+# Example usage with different criteria
+criteria = ['distance', 'maxclust', 'inconsistent']
+for criterion in criteria:
+    print(f"\nTesting with criterion: {criterion}")
+    # Also test with specific number of clusters
+    compare_clustering_methods(
+        filtered_features,
+        fcluster_criterion=criterion,
+        sample_size=0.0001,
+        n_clusters=5
+    )
 # %%
