@@ -28,7 +28,7 @@ spark = SparkSession \
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
 # 仅仅要release_date在1920-2020的
-#df = df.filter((F.col("release_date").between("1920-01-01", "2020-12-31")))
+df = df.filter((F.col("release_date").between("1960-01-01", "2020-12-31")))
 print(df.count())
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
@@ -273,9 +273,10 @@ def find_optimal_pca_components(features,threshold=0.9,k=None):
 # 1. PCA: find optimal number of components
 optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features,k=2)
 components_df = analyze_pca_composition(model_pca, feature_cols)
+#%% KMeans
 # 2. KMeans: find optimal k, based on PCA-transformed features
 features_pca.persist()
-optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 4))
+optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 5))
 
 
 #%% merge cluster results
@@ -302,7 +303,15 @@ cluster_results.groupby('prediction') \
               .count() \
               .orderBy('prediction') \
               .show()
+
+cluster_results=merged_results
+cluster_results.groupby('prediction') \
+              .count() \
+              .orderBy('prediction') \
+              .show()
+
 '''
+
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -317,10 +326,12 @@ renumbered_clusters = distinct_clusters.withColumn("new_prediction", F.row_numbe
 cluster_results = cluster_results.join(
     renumbered_clusters, on="prediction", how="left"
 ).drop("prediction").withColumnRenamed("new_prediction", "prediction")
+
+cluster_results.groupby('prediction') \
+              .count() \
+              .orderBy('prediction') \
+              .show()
 '''
-
-
-
 
 #%% visualization functions
 
@@ -2559,7 +2570,7 @@ def distributed_time_series_analysis(cluster_data, sample_size=0.1, seed=None,vi
             plt.tight_layout()
             plt.show()
     
-    return prophet_results, data_with_distances
+    return prophet_results, data_with_distances,yearly_distributions_pd
 
 
 # fitting and jointplot visualization
@@ -2818,14 +2829,877 @@ extract_and_visualize_regressor_coefficients_with_ci_numeric(
 # %%
 
 # Example usage
-prophet_results, processed_data = distributed_time_series_analysis(
+prophet_results, processed_data,yearly_distributions_pd = distributed_time_series_analysis(
     cluster_results, 
     sample_size=0.99,
     bins=[i/10 for i in range(0,60,5)],
     forecast_years=0,
     cycle_years=40,
     holidays=['1966-01-01', '1993-01-01'],
-    visualize=False
+    visualize=True
 )
 
+# %%
+def visualize_innovation_levels_over_time(yearly_distributions_pd, figsize=(12, 6)):
+    """
+    Visualize the distribution of innovation levels over time.
+    
+    Args:
+        yearly_distributions_pd: Pandas DataFrame containing yearly distributions of innovation levels
+        figsize: Tuple specifying figure size
+    """
+    # Create figure
+    plt.figure(figsize=figsize)
+    
+    # Get innovation level columns (excluding 'year')
+    level_columns = [col for col in yearly_distributions_pd.columns if col != 'year']
+    
+    # Create colormap
+    n_levels = len(level_columns)
+    colors = plt.cm.viridis(np.linspace(0, 1, n_levels))
+    
+    # Plot each innovation level
+    for level, color in zip(level_columns, colors):
+        plt.plot(yearly_distributions_pd['year'], 
+                yearly_distributions_pd[level],
+                '-o', markersize=4, color=color,
+                label=f'Level {level}')
+    
+    # Customize plot
+    plt.xlabel('Year')
+    plt.ylabel('Number of Songs')
+    plt.title('Distribution of Innovation Levels Over Time')
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=45)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+# Merge bins into new ranges [0-1.5, 1.5-100]
+import copy
+yearly_distributions_pd2 = copy.deepcopy(yearly_distributions_pd)
+new_ranges = ['0.0-1.5', '1.5-100.0']
+
+# Initialize new columns with zeros
+yearly_distributions_pd2['0.0-1.5'] = 0
+yearly_distributions_pd2['1.5-100.0'] = 0
+
+# Iterate through original columns and add to appropriate new range
+for col in yearly_distributions_pd2.columns:
+    if col != 'year':
+        # Extract range bounds from column name
+        lower, upper = map(float, col.split('-'))
+        
+        # Add to appropriate new range
+        if upper <= 1.5:
+            yearly_distributions_pd2['0.0-1.5'] += yearly_distributions_pd2[col]
+        else:
+            yearly_distributions_pd2['1.5-100.0'] += yearly_distributions_pd2[col]
+
+# Keep only year and new range columns            
+yearly_distributions_pd2 = yearly_distributions_pd2[['year'] + new_ranges]
+
+visualize_innovation_levels_over_time(yearly_distributions_pd2)
+
+#%%
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import animation
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, ArrayType
+from pyspark.ml.functions import vector_to_array
+def plot_yearly_distribution_animation_distributed(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time,
+    using distributed computing for both data preparation and bin counting.
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata.
+        sample_size: Fraction of data to sample.
+        grid_size: Number of grid cells in each dimension.
+        seed: Random seed for sampling.
+    """
+
+    try:
+        # Sample and prepare data using Spark
+        sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+        
+        # Extract year and convert features to array
+        prepared_data = sampled_data.withColumn(
+            'year',
+            F.year(F.to_timestamp('release_date'))
+        ).withColumn(
+            'features_array',
+            vector_to_array(F.col('features'))
+        )
+        
+        # Get number of dimensions and extract features into columns
+        num_features = prepared_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+        for i in range(num_features):
+            prepared_data = prepared_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+        
+        # Calculate min/max for grid edges using Spark
+        feature_stats = prepared_data.agg(
+            F.min('feature_0').alias('x_min'),
+            F.max('feature_0').alias('x_max'),
+            F.min('feature_1').alias('y_min'),
+            F.max('feature_1').alias('y_max')
+        ).collect()[0]
+        
+        x_edges = np.linspace(feature_stats['x_min'], feature_stats['x_max'], grid_size)
+        y_edges = np.linspace(feature_stats['y_min'], feature_stats['y_max'], grid_size)
+        
+        # Broadcast edges to workers
+        x_edges_bc = cluster_data.sql_ctx.sparkSession.sparkContext.broadcast(x_edges)
+        y_edges_bc = cluster_data.sql_ctx.sparkSession.sparkContext.broadcast(y_edges)
+        
+        # Assign bin indices to each song
+        def assign_bin(x, edges):
+            return np.digitize(x, edges) - 1  # Convert bin index to zero-based
+        
+        assign_bin_udf = udf(lambda arr: (assign_bin(float(arr[0]), x_edges_bc.value), assign_bin(float(arr[1]), y_edges_bc.value)), ArrayType(IntegerType()))
+        prepared_data = prepared_data.withColumn('bin_indices', assign_bin_udf(array('feature_0', 'feature_1')))
+        
+        # Explode bin indices into separate columns
+        prepared_data = prepared_data.withColumn('x_bin', F.col('bin_indices')[0]).withColumn('y_bin', F.col('bin_indices')[1])
+        
+        # Calculate counts per bin per year
+        bin_counts = prepared_data.groupBy('year', 'x_bin', 'y_bin').count().cache()
+        
+        # Convert to Pandas for visualization
+        bin_counts_pd = bin_counts.toPandas()
+
+        # Get unique years
+        years = sorted(bin_counts_pd['year'].unique())
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 8))
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+        
+        def update(frame):
+            ax.clear()
+            year = years[frame]
+            year_data = bin_counts_pd[bin_counts_pd['year'] == year]
+            
+            # Create grid for heatmap
+            heatmap = np.zeros((grid_size, grid_size))
+            for _, row in year_data.iterrows():
+                x_bin, y_bin, count = row['x_bin'], row['y_bin'], row['count']
+                if 0 <= x_bin < grid_size and 0 <= y_bin < grid_size:
+                    heatmap[x_bin, y_bin] = count
+            
+            # Plot heatmap
+            im = ax.imshow(
+                heatmap,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                cmap='viridis',
+                aspect='auto'
+            )
+            
+            ax.set_title(f'Year: {year}')
+            ax.set_xlabel('First Principal Component')
+            ax.set_ylabel('Second Principal Component')
+            
+            # Update colorbar
+            if frame == 0:
+                cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+                cbar.ax.yaxis.label.set_color('white')
+                cbar.ax.tick_params(colors='white')
+        
+        # Create animation
+        anim = animation.FuncAnimation(
+            fig,
+            update,
+            frames=len(years),
+            interval=100,
+            repeat=True
+        )
+        
+        plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+        plt.tight_layout()
+        
+        # Save animation
+        anim.save('music_distribution_evolution_distributed.gif', writer='pillow')
+        plt.show()
+
+        # Clean up
+        bin_counts.unpersist()
+        
+    except Exception as e:
+        print(f"Error in plot_yearly_distribution_animation_distributed: {e}")
+        raise
+
+# Example usage 
+plot_yearly_distribution_animation_distributed(cluster_results, sample_size=0.01)
+# %% animation all; PCA space with distributed computing
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import animation
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, ArrayType
+from pyspark.ml.functions import vector_to_array
+
+def plot_yearly_distribution_animation(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time,
+    using distributed computing for data processing
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata
+        sample_size: Fraction of data to sample
+        grid_size: Number of grid cells in each dimension
+        seed: Random seed for sampling
+    """
+    # Sample and prepare data using Spark
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Extract year and convert features to array
+    prepared_data = sampled_data.withColumn(
+        'year',
+        F.year(F.to_timestamp('release_date'))
+    ).withColumn(
+        'features_array',
+        vector_to_array(F.col('features'))
+    )
+    
+    # Get number of dimensions and extract features into columns
+    num_features = prepared_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    for i in range(num_features):
+        prepared_data = prepared_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Calculate min/max for grid edges using Spark
+    feature_stats = prepared_data.agg(
+        F.min('feature_0').alias('x_min'),
+        F.max('feature_0').alias('x_max'),
+        F.min('feature_1').alias('y_min'),
+        F.max('feature_1').alias('y_max')
+    ).collect()[0]
+    
+    x_edges = np.linspace(feature_stats['x_min'], feature_stats['x_max'], grid_size)
+    y_edges = np.linspace(feature_stats['y_min'], feature_stats['y_max'], grid_size)
+    
+    # Convert to pandas for visualization
+    df = prepared_data.toPandas()
+    pca_coords = df[['feature_0', 'feature_1']].values
+    years = df['year'].values
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    
+    def update(frame):
+        ax.clear()
+        year = sorted(np.unique(years))[frame]
+        year_mask = years == year
+        year_coords = pca_coords[year_mask]
+        
+        if len(year_coords) > 0:
+            # Calculate 2D histogram
+            hist, _, _ = np.histogram2d(
+                year_coords[:,0],
+                year_coords[:,1], 
+                bins=[x_edges, y_edges]
+            )
+            
+            # Plot heatmap
+            im = ax.imshow(
+                hist.T,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                cmap='viridis',
+                aspect='auto'
+            )
+            
+            ax.set_title(f'Year: {year}')
+            ax.set_xlabel('First Principal Component')
+            ax.set_ylabel('Second Principal Component')
+            
+            # Update colorbar
+            if frame == 0:
+                cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+                cbar.ax.yaxis.label.set_color('white')
+                cbar.ax.tick_params(colors='white')
+    
+    # Create animation
+    unique_years = sorted(np.unique(years))
+    anim = animation.FuncAnimation(
+        fig,
+        update, 
+        frames=len(unique_years),
+        interval=100,
+        repeat=True
+    )
+    
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+    
+    # Save animation
+    anim.save('music_distribution_evolution.gif', writer='pillow')
+    plt.show()
+
+# Example usage 
+plot_yearly_distribution_animation(cluster_results, sample_size=0.01)
+# %%
+
+def plot_yearly_distribution_animation_distributed(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time,
+    using distributed computing for both data preparation and bin counting.
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata.
+        sample_size: Fraction of data to sample.
+        grid_size: Number of grid cells in each dimension.
+        seed: Random seed for sampling.
+    """
+    from pyspark.sql import Window
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib import animation
+    from pyspark.sql.functions import col
+
+    # Sample and prepare data using Spark
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Extract year and convert features to array
+    prepared_data = sampled_data.withColumn(
+        'year',
+        F.year(F.to_timestamp('release_date'))
+    ).withColumn(
+        'features_array',
+        vector_to_array(F.col('features'))
+    )
+    
+    # Get number of dimensions and extract features into columns
+    num_features = prepared_data.select(F.size('features_array').alias('num_features')).first()['num_features']
+    for i in range(num_features):
+        prepared_data = prepared_data.withColumn(f'feature_{i}', F.col('features_array')[i])
+    
+    # Calculate min/max for grid edges using Spark
+    feature_stats = prepared_data.agg(
+        F.min('feature_0').alias('x_min'),
+        F.max('feature_0').alias('x_max'),
+        F.min('feature_1').alias('y_min'),
+        F.max('feature_1').alias('y_max')
+    ).collect()[0]
+    
+    x_edges = np.linspace(feature_stats['x_min'], feature_stats['x_max'], grid_size)
+    y_edges = np.linspace(feature_stats['y_min'], feature_stats['y_max'], grid_size)
+    
+    # Broadcast edges to workers
+    x_edges_bc = cluster_data.sql_ctx.sparkSession.sparkContext.broadcast(x_edges)
+    y_edges_bc = cluster_data.sql_ctx.sparkSession.sparkContext.broadcast(y_edges)
+    
+    # Assign bin indices to each song
+    def assign_bin(x, edges):
+        return np.digitize(x, edges) - 1  # Convert bin index to zero-based
+    
+    assign_bin_udf = F.udf(lambda arr: (assign_bin(arr[0], x_edges_bc.value), assign_bin(arr[1], y_edges_bc.value)), ArrayType(IntegerType()))
+    prepared_data = prepared_data.withColumn('bin_indices', assign_bin_udf(F.array('feature_0', 'feature_1')))
+    
+    # Explode bin indices into separate columns
+    prepared_data = prepared_data.withColumn('x_bin', F.col('bin_indices')[0]).withColumn('y_bin', F.col('bin_indices')[1])
+    
+    # Calculate counts per bin per year
+    bin_counts = prepared_data.groupBy('year', 'x_bin', 'y_bin').count()
+    
+    # Convert to Pandas for visualization
+    bin_counts_pd = bin_counts.toPandas()
+
+    # Get unique years
+    years = sorted(bin_counts_pd['year'].unique())
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    
+    def update(frame):
+        ax.clear()
+        year = years[frame]
+        year_data = bin_counts_pd[bin_counts_pd['year'] == year]
+        
+        # Create grid for heatmap
+        heatmap = np.zeros((grid_size, grid_size))
+        for _, row in year_data.iterrows():
+            x_bin, y_bin, count = row['x_bin'], row['y_bin'], row['count']
+            if 0 <= x_bin < grid_size and 0 <= y_bin < grid_size:
+                heatmap[y_bin, x_bin] = count
+        
+        # Plot heatmap
+        im = ax.imshow(
+            heatmap.T,
+            extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+            origin='lower',
+            cmap='viridis',
+            aspect='auto'
+        )
+        
+        ax.set_title(f'Year: {year}')
+        ax.set_xlabel('First Principal Component')
+        ax.set_ylabel('Second Principal Component')
+        
+        # Update colorbar
+        if frame == 0:
+            cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+            cbar.ax.yaxis.label.set_color('white')
+            cbar.ax.tick_params(colors='white')
+    
+    # Create animation
+    anim = animation.FuncAnimation(
+        fig,
+        update,
+        frames=len(years),
+        interval=100,
+        repeat=True
+    )
+    
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+    
+    # Save animation
+    anim.save('music_distribution_evolution_distributed.gif', writer='pillow')
+    plt.show()
+
+# Example usage 
+plot_yearly_distribution_animation_distributed(cluster_results, sample_size=0.01)
+# %%
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, ArrayType
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import animation
+
+def plot_yearly_distribution_animation_distributed(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time,
+    using Spark distributed computing for both data preparation and bin counting.
+
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata.
+        sample_size: Fraction of data to sample.
+        grid_size: Number of grid cells in each dimension.
+        seed: Random seed for sampling.
+
+    Returns:
+        Spark DataFrame containing yearly grid counts, to be used for further analysis or visualization.
+    """
+    # Step 1: Sample data
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Step 2: Extract year and prepare PCA features
+    prepared_data = sampled_data.withColumn(
+        'year', F.year(F.to_timestamp('release_date'))
+    ).withColumn(
+        'features_array', vector_to_array(F.col('features'))
+    )
+    
+    # Step 3: Determine grid edges (min/max)
+    feature_stats = prepared_data.agg(
+        F.min('features_array')[0].alias('x_min'),
+        F.max('features_array')[0].alias('x_max'),
+        F.min('features_array')[1].alias('y_min'),
+        F.max('features_array')[1].alias('y_max')
+    ).collect()[0]
+    
+    x_edges = np.linspace(feature_stats['x_min'], feature_stats['x_max'], grid_size + 1)
+    y_edges = np.linspace(feature_stats['y_min'], feature_stats['y_max'], grid_size + 1)
+
+    # Step 4: Assign bin indices using Spark
+    def assign_bin(x, edges):
+        return int(np.digitize(x, edges) - 1)  # Convert bin index to zero-based
+
+    assign_bin_udf = F.udf(lambda arr: (assign_bin(arr[0], x_edges), assign_bin(arr[1], y_edges)), ArrayType(IntegerType()))
+    prepared_data = prepared_data.withColumn('bin_indices', assign_bin_udf(F.col('features_array')))
+    prepared_data = prepared_data.withColumn('x_bin', F.col('bin_indices')[0]).withColumn('y_bin', F.col('bin_indices')[1])
+
+    # Step 5: Count occurrences per bin per year
+    bin_counts = prepared_data.groupBy('year', 'x_bin', 'y_bin').agg(
+        F.count('*').alias('count')
+    )
+
+    # Collect unique years
+    years = bin_counts.select('year').distinct().orderBy('year').collect()
+    unique_years = [row['year'] for row in years]
+
+    # Step 6: Create animation
+    fig, ax = plt.subplots(figsize=(10, 8))
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+
+    # Pre-fetch data for all years using Spark (minimizing collect calls)
+    bin_counts_dict = {year: bin_counts.filter(F.col('year') == year).collect() for year in unique_years}
+
+    def update(frame):
+        ax.clear()
+        year = unique_years[frame]
+        year_data = bin_counts_dict[year]
+
+        # Create a grid for the heatmap
+        heatmap = np.zeros((grid_size, grid_size))
+        for row in year_data:
+            x_bin, y_bin, count = row['x_bin'], row['y_bin'], row['count']
+            if 0 <= x_bin < grid_size and 0 <= y_bin < grid_size:
+                heatmap[y_bin, x_bin] = count
+
+        # Plot the heatmap
+        im = ax.imshow(
+            heatmap.T,
+            extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+            origin='lower',
+            cmap='viridis',
+            aspect='auto'
+        )
+        ax.set_title(f'Year: {year}')
+        ax.set_xlabel('First Principal Component')
+        ax.set_ylabel('Second Principal Component')
+
+        # Add colorbar on the first frame
+        if frame == 0:
+            fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+
+    anim = animation.FuncAnimation(
+        fig,
+        update,
+        frames=len(unique_years),
+        interval=200,
+        repeat=True
+    )
+
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+
+    # Save the animation
+    anim.save('music_distribution_evolution_distributed.gif', writer='pillow')
+    plt.show()
+
+    return bin_counts  # Return Spark DataFrame containing yearly bin counts
+
+# Example usage
+result = plot_yearly_distribution_animation_distributed(cluster_results, sample_size=0.01, grid_size=50)
+# %% heatmap evolution
+GRID_SIZE = 70
+from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType
+
+def calculate_yearly_bin_counts(cluster_data, sample_size=0.1, grid_size=50, seed=42):
+    """
+    Calculate yearly bin counts for PCA features using Spark.
+
+    Args:
+        cluster_data: Spark DataFrame containing PCA features and metadata.
+        sample_size: Fraction of data to sample.
+        grid_size: Number of grid cells in each dimension.
+        seed: Random seed for sampling.
+
+    Returns:
+        Spark DataFrame with year, x_bin, y_bin, and count for each bin.
+    """
+    # Step 1: Sample data
+    sampled_data = cluster_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+
+    # Step 2: Extract year and prepare PCA features
+    prepared_data = sampled_data.withColumn(
+        'year', F.year(F.to_timestamp('release_date'))
+    ).withColumn(
+        'features_array', vector_to_array(F.col('features'))
+    )
+
+    # Step 3: Determine feature ranges
+    feature_stats = prepared_data.agg(
+        F.min('features_array')[0].alias('x_min'),
+        F.max('features_array')[0].alias('x_max'),
+        F.min('features_array')[1].alias('y_min'),
+        F.max('features_array')[1].alias('y_max')
+    ).collect()[0]
+    
+    x_min, x_max = feature_stats['x_min'], feature_stats['x_max']
+    y_min, y_max = feature_stats['y_min'], feature_stats['y_max']
+
+    # Step 4: Define UDF for interval assignment
+    def assign_bin(value, min_val, max_val, grid_size):
+        """Map a value to a bin index based on the grid range."""
+        #return int((value - min_val) / (max_val - min_val) * grid_size)
+        if max_val == min_val:  # Handle edge case where range is zero
+            return 0
+        normalized_value = (value - min_val) / (max_val - min_val)  # Normalize value to [0, 1]
+        bin_index = int(normalized_value * grid_size)  # Scale to [0, grid_size]
+        return min(max(bin_index, 0), grid_size - 1)  # Clamp to valid range
+
+    assign_bin_udf_x = F.udf(lambda x: assign_bin(x, x_min, x_max, grid_size), IntegerType())
+    assign_bin_udf_y = F.udf(lambda y: assign_bin(y, y_min, y_max, grid_size), IntegerType())
+
+    # Step 5: Assign bins
+    prepared_data = prepared_data.withColumn('x_bin', assign_bin_udf_x(F.col('features_array')[0]))
+    prepared_data = prepared_data.withColumn('y_bin', assign_bin_udf_y(F.col('features_array')[1]))
+
+    # Step 6: Group by year and bins, then count
+    bin_counts = prepared_data.groupBy('year', 'x_bin', 'y_bin').agg(
+        F.count('*').alias('count')
+    )
+
+    return bin_counts
+
+# Calculate bin counts using Spark
+bin_counts = calculate_yearly_bin_counts(cluster_results, sample_size=0.99, grid_size=GRID_SIZE)
+bin_counts.show()
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+def plot_yearly_heatmaps_animation(bin_counts, grid_size, filename="heatmap_animation.gif", year_list=None):
+    """
+    Create an animated heatmap showing the normalized distribution of counts across x_bin and y_bin over years.
+    
+    Args:
+        bin_counts: Spark DataFrame
+            DataFrame containing columns ['year', 'x_bin', 'y_bin', 'count'].
+        grid_size: int
+            Size of the grid for both x and y dimensions.
+        filename: str
+            Output filename for the animated GIF.
+        year_list: list, optional
+            List of years to include in the animation. If None, include all years.
+    """
+    bin_counts_pd = bin_counts.toPandas()
+    x_bins = range(grid_size)  # Define x_bin range
+    y_bins = range(grid_size)  # Define y_bin range
+    
+    if year_list is None:
+        years = sorted(bin_counts_pd['year'].unique())  # Get all years
+    else:
+        years = sorted(year_list)  # Use provided years
+    
+    # Standardize counts within each year
+    bin_counts_pd['normalized_count'] = bin_counts_pd.groupby('year')['count'].apply(
+        lambda x: (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 0
+    )
+    
+    # Prepare figure for animation
+    fig, ax = plt.subplots(figsize=(8, 6))
+    heatmap_data = np.zeros((grid_size, grid_size))  # Initialize an empty matrix
+    
+    # Configure heatmap style
+    sns_heatmap = sns.heatmap(
+        heatmap_data, 
+        cmap='YlOrRd', 
+        cbar_kws={'label': 'Normalized Count'}, 
+        annot=True, 
+        fmt='.2f', 
+        mask=(heatmap_data == 0),  # Mask zero values
+        vmin=0,
+        vmax=1,  # Normalized range
+        ax=ax
+    )
+    
+    # Set axis labels and ticks with fewer tick marks
+    ax.set_xlabel('First Principal Component')
+    ax.set_ylabel('Second Principal Component')
+    
+    # Show fewer ticks (e.g. only 5 ticks)
+    tick_positions = np.linspace(0, grid_size, 5)
+    ax.set_xticks(tick_positions)
+    ax.set_yticks(tick_positions)
+    
+    # Set tick labels as integers
+    tick_labels = [int(x) for x in tick_positions]
+    ax.set_xticklabels(tick_labels)
+    ax.set_yticklabels(tick_labels)
+
+    def update(year):
+        """Update the heatmap for a given year."""
+        # Clear the heatmap data
+        heatmap_data.fill(0)
+        
+        # Filter data for current year
+        year_data = bin_counts_pd[bin_counts_pd['year'] == year]
+        
+        # Fill normalized count data
+        for _, row in year_data.iterrows():
+            x, y, norm_count = int(row['x_bin']), int(row['y_bin']), row['normalized_count']
+            if 0 <= x < grid_size and 0 <= y < grid_size:
+                heatmap_data[y, x] = norm_count  # Fill corresponding position
+        
+        # Update heatmap data
+        sns_heatmap.collections[0].set_array(heatmap_data.flatten())
+        
+        # Update the title dynamically
+        ax.set_title(f'Heatmap for Year {year}')
+    
+    # Create animation
+    ani = FuncAnimation(fig, update, frames=years, repeat=False, interval=20)
+    
+    # Save as GIF
+    gif_writer = PillowWriter()  # Slower FPS for better visualization
+    gif_filename = filename
+    ani.save(gif_filename, writer=gif_writer)
+    print(f"Animation saved as {gif_filename}")
+
+
+plot_yearly_heatmaps_animation(bin_counts, grid_size=GRID_SIZE, filename="heatmap_animation.gif")
+
+# %% sample
+
+def plot_pca_sample_by_year(cluster_data, start_year=None, end_year=None, sample_size=0.1, seed=42):
+    """
+    Create a scatter plot of sampled songs in PCA space, colored by cluster, for a specified year range
+    
+    Args:
+        cluster_data: PySpark DataFrame with features and metadata
+        start_year: Start year for filtering (inclusive). If None, no lower bound
+        end_year: End year for filtering (inclusive). If None, no upper bound
+        sample_size: Fraction of songs to sample (default 0.1)
+        seed: Random seed for sampling
+    """
+    # Filter data by year range
+    filtered_data = cluster_data
+    if start_year is not None:
+        filtered_data = filtered_data.filter(F.year(F.to_timestamp('release_date')) >= start_year)
+    if end_year is not None:
+        filtered_data = filtered_data.filter(F.year(F.to_timestamp('release_date')) <= end_year)
+    
+    # Sample data
+    sampled_data = filtered_data.sample(withReplacement=False, fraction=sample_size, seed=seed)
+    
+    # Convert to pandas for visualization
+    df = sampled_data.select('features', 'prediction').toPandas()
+    
+    # Extract PCA coordinates
+    pca_coords = np.vstack(df['features'].values)
+    
+    # Define markers and colors
+    markers = ['o', 's', '^', 'D', 'v', 'p', 'h', '8', '*', 'H']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+              
+    # Create scatter plot
+    plt.figure(figsize=(12, 8))
+    
+    # Plot each cluster with different marker and color
+    for cluster_id in df['prediction'].unique():
+        mask = df['prediction'] == cluster_id
+        plt.scatter(pca_coords[mask, 0], pca_coords[mask, 1], 
+                   marker=markers[cluster_id % len(markers)],
+                   c=[colors[cluster_id % len(colors)]],
+                   label=f'Cluster {cluster_id}',
+                   alpha=0.6, s=50)
+    
+    # Add labels and title
+    plt.xlabel('First Principal Component')
+    plt.ylabel('Second Principal Component')
+    
+    # Create title based on year range
+    if start_year is not None and end_year is not None:
+        year_range = f"{start_year}-{end_year}"
+    elif start_year is not None:
+        year_range = f"{start_year}+"
+    elif end_year is not None:
+        year_range = f"Until {end_year}"
+    else:
+        year_range = "All Years"
+    
+    plt.title(f'PCA Distribution of Songs ({year_range}) by Cluster (Sample Size: {sample_size*100:.1f}%)')
+    
+    # Add legend
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Add grid
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_pca_sample_by_year(cluster_results, start_year=1900, end_year=2020, sample_size=0.01)
+
+
+
+# %%
+def plot_pca_sample(features_pca, sample_size=0.1, seed=None):
+    """
+    Plot sampled PCA points in 2D space
+    
+    Args:
+        features_pca: DataFrame with PCA features
+        sample_size: Fraction of data to sample (default 0.1)
+        seed: Random seed for sampling (optional)
+    """
+    # Sample data
+    if seed is None:
+        sampled_data = features_pca.sample(False, sample_size)
+    else:
+        sampled_data = features_pca.sample(False, sample_size, seed=seed)
+    
+    # Convert to pandas and extract coordinates
+    df = sampled_data.toPandas()
+    coords = np.vstack(df['features'].values)
+    
+    # Create scatter plot
+    plt.figure(figsize=(10, 8))
+    plt.scatter(coords[:, 0], coords[:, 1], alpha=0.5)
+    
+    plt.xlabel('First Principal Component')
+    plt.ylabel('Second Principal Component')
+    plt.title(f'PCA Distribution of Songs (Sample Size: {sample_size*100:.1f}%)')
+    plt.grid(True, alpha=0.3)
+    plt.ylim(-2.3, 1.3)
+    plt.xlim(-6.3, 4.3)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_pca_sample(features_pca, sample_size=0.01)
+
+# %%
+def plot_pca_sample(features_pca, df, sample_size=0.1, seed=None):
+    """
+    Plot sampled PCA points in 2D space, colored by year and label points with high second component
+    Args:
+        features_pca: DataFrame with PCA features
+        df: Original dataframe with release dates
+        sample_size: Fraction of data to sample (default 0.1)
+        seed: Random seed for sampling (optional)
+    """
+    # Add tmp_id for joining
+    features_pca_with_id = features_pca.withColumn("tmp_id", F.monotonically_increasing_id())
+    df_with_id = df.withColumn("tmp_id", F.monotonically_increasing_id())
+    
+    # Join with original df to get release dates and names
+    joined_data = features_pca_with_id.join(df_with_id.select("tmp_id", "release_date", "name"), on="tmp_id")
+    
+    # Convert to pandas and extract coordinates
+    df_pd = joined_data.toPandas()
+    coords = np.vstack(df_pd['features'].values)
+    
+    # Handle invalid date formats
+    years = pd.to_datetime(df_pd['release_date'], errors='coerce').dt.year
+    # Drop rows with invalid years
+    valid_mask = ~years.isna()
+    coords = coords[valid_mask]
+    years = years[valid_mask]
+    names = df_pd['name'][valid_mask]
+    
+    # Create scatter plot
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(coords[:, 0], coords[:, 1], c=years, cmap='viridis', alpha=0.5)
+    plt.colorbar(scatter, label='Year')
+    
+    # Add labels for points with second component > 30
+    for i, (x, y) in enumerate(coords):
+        if y > 30:
+            plt.annotate(names.iloc[i], (x, y), xytext=(5, 5), textcoords='offset points')
+            print(f"Song: {names.iloc[i]}, Year: {years.iloc[i]}, PC1: {x:.2f}, PC2: {y:.2f}")
+    
+    plt.xlabel('First Principal Component')
+    plt.ylabel('Second Principal Component')
+    plt.title('PCA Distribution of Songs by Year')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+# Example usage
+plot_pca_sample(features_pca, df)
 # %%
