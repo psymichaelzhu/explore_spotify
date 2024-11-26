@@ -278,7 +278,7 @@ filtered_features = filter_pca_features(features_pca, -10, 10)
 print(f"Number of songs before filtering: {features_pca.count()}")
 print(f"Number of songs after filtering: {filtered_features.count()}")
 
-#%%
+#%% KMeans
 def find_optimal_kmeans(data, k_values):
     """
     Optimized K-means clustering for distributed computing
@@ -344,7 +344,7 @@ optimal_k, silhouettes, final_predictions = find_optimal_kmeans(filtered_feature
 print(f"Optimal number of clusters: {optimal_k}")
 
 
-#%%
+#%% DBSCAN
 from pyspark.ml.feature import StandardScaler
 from pyspark.sql.functions import udf
 from pyspark.sql.types import IntegerType
@@ -505,38 +505,13 @@ def visualize_dbscan_clusters(raw_features, eps=0.5, min_samples=5, sample_size=
         features.unpersist()
     
 visualize_dbscan_clusters(filtered_features, eps=0.4, min_samples=50, sample_size=0.01)
-# %%
+# %% Hierarchical Clustering
 from pyspark.ml.feature import StandardScaler
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 from kneed import KneeLocator
-
-from pyspark.ml.feature import StandardScaler
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from pyspark.ml.feature import StandardScaler
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from kneed import KneeLocator
-from pyspark.ml.feature import StandardScaler
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from kneed import KneeLocator
-from pyspark.ml.feature import StandardScaler
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from kneed import KneeLocator
-
 def visualize_hierarchical_clusters(raw_features, linkage_method="ward", sample_size=0.01, n_clusters=None):
     """
     Perform Hierarchical Clustering and visualize results using PCA components.
@@ -549,7 +524,8 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", sample_
         n_clusters: Number of clusters to form. If None, will determine automatically
     
     Returns:
-        None (displays dendrogram and scatter plot)
+        pandas_df: Pandas DataFrame with cluster assignments
+        n_clusters: Number of clusters used
     """
     # Sample features for better performance
     features = raw_features.sample(withReplacement=False, fraction=sample_size, seed=42)
@@ -560,7 +536,7 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", sample_
         features.cache()
         
         # Standardize features
-        standardizer = StandardScaler(inputCol="features", outputCol="scaled_features", withMean=True, withStd=True)
+        standardizer = StandardScaler(inputCol="features", outputCol="scaled_features")
         scaler = standardizer.fit(features)
         scaled_features = scaler.transform(features)
         
@@ -648,19 +624,22 @@ def visualize_hierarchical_clusters(raw_features, linkage_method="ward", sample_
         plt.legend(handles=legend_elements)
         plt.show()
         
+        return pandas_df, n_clusters
+        
     except Exception as e:
         print(f"Error in hierarchical clustering or visualization: {str(e)}")
+        return None, None
         
     finally:
         # Clean up
         features.unpersist()
 
 
-#%%
+#%% Hierarchical Clustering example
 visualize_hierarchical_clusters(filtered_features, linkage_method="ward", sample_size=0.0001)
 visualize_hierarchical_clusters(filtered_features, linkage_method="ward", sample_size=0.0001, n_clusters=4)
 
-# %%
+# %% Hierarchical Clustering comparison
 def compare_clustering_methods(filtered_features,
                              linkage_methods=['ward', 'complete', 'average'],
                              sample_size=0.0001, n_clusters=None):
@@ -699,9 +678,14 @@ compare_clustering_methods(
     sample_size=0.0001,
     n_clusters=5
 )
-# %%
+# %% Hierarchical Clustering comparison example
 compare_clustering_methods(
     filtered_features,
     sample_size=0.01
+)
+compare_clustering_methods(
+    filtered_features,
+    sample_size=0.01,
+    n_clusters=4
 )
 # %%
