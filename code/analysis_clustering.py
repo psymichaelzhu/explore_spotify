@@ -292,7 +292,7 @@ cluster_counts = merged_results.groupby('prediction').count()
 cluster_counts.show()
 
 # Filter out clusters with less than 100000 songs
-small_clusters = cluster_counts.filter(F.col("count") < 100000).select("prediction").rdd.flatMap(lambda x: x).collect()
+small_clusters = cluster_counts.filter(F.col("count") < 10000).select("prediction").rdd.flatMap(lambda x: x).collect()
 cluster_results = merged_results.filter(~F.col("prediction").isin(small_clusters))
 
 # filter out songs before 1920 and after 2020
@@ -303,13 +303,6 @@ cluster_results.groupby('prediction') \
               .count() \
               .orderBy('prediction') \
               .show()
-
-cluster_results=merged_results
-cluster_results.groupby('prediction') \
-              .count() \
-              .orderBy('prediction') \
-              .show()
-
 '''
 
 from pyspark.sql import Window

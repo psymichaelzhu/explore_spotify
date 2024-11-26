@@ -723,7 +723,7 @@ from pyspark.sql import Row
 def visualize_hierarchical_clusters_with_results(raw_features, linkage_method="ward", sample_size=0.01, n_clusters=None):
     """
     Perform Hierarchical Clustering and visualize results using PCA components.
-    Automatically determine the optimal number of clusters using the elbow method if n_clusters is not specified.
+    Automatically determine the optimal number of clusters using the distance method if n_clusters is not specified.
     
     Args:
         raw_features: Spark DataFrame with PCA features
@@ -737,8 +737,9 @@ def visualize_hierarchical_clusters_with_results(raw_features, linkage_method="w
     """
     # Sample features for better performance
     features = raw_features.sample(withReplacement=False, fraction=sample_size, seed=42)
-    if features.count() > 10000:#二次采样
-        features = features.sample(withReplacement=False, fraction=0.01, seed=42)
+    num_samples = features.count()
+    if num_samples > 10000:#二次采样
+        features = features.sample(withReplacement=False, fraction=1000/num_samples, seed=42)
 
     print(f"Number of songs after sampling: {features.count()}")
     
@@ -766,42 +767,48 @@ def visualize_hierarchical_clusters_with_results(raw_features, linkage_method="w
         # Perform hierarchical clustering
         Z = linkage(X, method=linkage_method)  # Compute the linkage matrix
         
-        if n_clusters is None:
-            # Find optimal number of clusters using distance differences
-            last_distances = Z[:, 2]
-            distance_diffs = np.diff(last_distances)
-            max_diff_idx = np.argmax(distance_diffs)
-            optimal_clusters = len(X) - max_diff_idx
-            print(f"Optimal number of clusters based on maximum distance difference: {optimal_clusters}")
-            n_clusters = optimal_clusters
-        else:
-            print(f"Using specified number of clusters: {n_clusters}")
-            
-        # Form clusters using optimal/specified number
-        cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+        # Find optimal number of clusters using distance threshold if not specified
+        distances = Z[:, 2]
+        mean_dist = np.mean(distances)
+        std_dist = np.std(distances)
+        threshold = mean_dist + std_dist
         
+        if n_clusters is None:
+            # Use distance threshold to determine clusters
+            cluster_labels = fcluster(Z, t=threshold, criterion='distance')
+            n_clusters = len(np.unique(cluster_labels))
+            print(f"Optimal number of clusters based on distance threshold: {n_clusters}")
+            use_threshold = True
+        else:
+            # Use specified number of clusters
+            print(f"Using specified number of clusters: {n_clusters}")
+            cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+            use_threshold = False
+            
         # Add cluster labels to the dataframe
         pandas_df['cluster'] = cluster_labels
         
-        # Visualize dendrogram with distance differences
+        # Visualize dendrogram with distance threshold
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 1, 1)
         dendrogram(Z, truncate_mode="lastp", p=20, leaf_rotation=90., leaf_font_size=10.)
+        if use_threshold:
+            plt.axhline(y=threshold, color='r', linestyle='--', label=f'Distance threshold: {threshold:.2f}')
+            plt.legend()
         plt.title(f"Dendrogram ({linkage_method} linkage)")
         plt.xlabel("Sample index")
         plt.ylabel("Distance")
         
-        # Plot distance differences
+        # Plot distance distribution
         plt.subplot(2, 1, 2)
-        distance_diffs = np.diff(Z[:, 2])
-        plt.plot(range(len(distance_diffs)), distance_diffs, 'b-')
-        if n_clusters is None:
-            plt.axvline(x=max_diff_idx, color='r', linestyle='--', 
-                       label=f'Maximum difference at {max_diff_idx}')
-        plt.title("Distance Differences Between Merges")
-        plt.xlabel("Merge Step")
-        plt.ylabel("Distance Difference")
-        plt.legend()
+        plt.hist(distances, bins=50)
+        if use_threshold:
+            plt.axvline(x=threshold, color='r', linestyle='--', 
+                       label=f'Distance threshold: {threshold:.2f}')
+            plt.legend()
+        plt.title("Distribution of Merge Distances")
+        plt.xlabel("Distance")
+        plt.ylabel("Frequency")
         plt.tight_layout()
         plt.show()
         
@@ -886,20 +893,19 @@ def cluster_by_filter(features, filter_type='year', filter_value=2020,
         
     
     return visualize_hierarchical_clusters_with_results(
-        raw_features=features,
+        raw_features=filtered_df,
         linkage_method=linkage_method,
         sample_size=sample_size,
         n_clusters=n_clusters
     )
 
 # Example usage for year 2020
-for linkage_method in ["ward", "complete", "average", "single"]:
+for linkage_method in ["ward"]:
     clustered_data, num_clusters = cluster_by_filter(
         scaled_features,
         linkage_method=linkage_method,
-        filter_type='year', 
-        filter_value=2017)
+        filter_type='artist', 
+        filter_value='Coldplay',
+        n_clusters=3
+    )
 
-
-
-# %%
