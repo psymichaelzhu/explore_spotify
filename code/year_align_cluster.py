@@ -28,7 +28,7 @@ spark = SparkSession \
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
 # 仅仅要release_date在1920-2020的
-#df = df.filter(~(F.col("release_date").between("1920-01-01", "2020-12-31")))
+#df = df.filter(~(F.col("release_date").between("2017-01-01", "2020-12-31")))
 print(df.count())
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
@@ -702,3 +702,204 @@ compare_clustering_methods(
 #联系
 #时间
 #spark
+
+# %% 匹配数据
+
+# %%
+standardizer = StandardScaler(inputCol="features", outputCol="scaled_features")
+scaler = standardizer.fit(filtered_features)
+scaled_features = scaler.transform(filtered_features)
+
+#%%
+
+from pyspark.sql import functions as F
+from pyspark.ml.feature import StandardScaler
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from pyspark.sql import Row
+
+def visualize_hierarchical_clusters_with_results(raw_features, linkage_method="ward", sample_size=0.01, n_clusters=None):
+    """
+    Perform Hierarchical Clustering and visualize results using PCA components.
+    Automatically determine the optimal number of clusters using the elbow method if n_clusters is not specified.
+    
+    Args:
+        raw_features: Spark DataFrame with PCA features
+        linkage_method: Linkage method for hierarchical clustering ("ward", "complete", "average", "single")
+        sample_size: Fraction of data to sample for visualization
+        n_clusters: Number of clusters to form. If None, will determine automatically
+    
+    Returns:
+        updated_features: Spark DataFrame with cluster assignments
+        n_clusters: Number of clusters used
+    """
+    # Sample features for better performance
+    features = raw_features.sample(withReplacement=False, fraction=sample_size, seed=42)
+    if features.count() > 10000:#二次采样
+        features = features.sample(withReplacement=False, fraction=0.01, seed=42)
+
+    print(f"Number of songs after sampling: {features.count()}")
+    
+    # Cache features for better performance
+    features.cache()
+    
+    try:
+        
+        # Convert vector to array
+        scaled_features = features.select(
+            "row_idx",  # Ensure we keep a reference to the original rows
+            vector_to_array("scaled_features").alias("features_array")
+        )
+        
+        # Convert to Pandas for hierarchical clustering
+        pandas_df = scaled_features.select(
+            "row_idx",
+            F.col("features_array")[0].alias("x"),
+            F.col("features_array")[1].alias("y")
+        ).toPandas()
+        
+        # Extract features as NumPy array
+        X = pandas_df[['x', 'y']].values
+        
+        # Perform hierarchical clustering
+        Z = linkage(X, method=linkage_method)  # Compute the linkage matrix
+        
+        if n_clusters is None:
+            # Find optimal number of clusters using distance differences
+            last_distances = Z[:, 2]
+            distance_diffs = np.diff(last_distances)
+            max_diff_idx = np.argmax(distance_diffs)
+            optimal_clusters = len(X) - max_diff_idx
+            print(f"Optimal number of clusters based on maximum distance difference: {optimal_clusters}")
+            n_clusters = optimal_clusters
+        else:
+            print(f"Using specified number of clusters: {n_clusters}")
+            
+        # Form clusters using optimal/specified number
+        cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+        
+        # Add cluster labels to the dataframe
+        pandas_df['cluster'] = cluster_labels
+        
+        # Visualize dendrogram with distance differences
+        plt.figure(figsize=(12, 8))
+        plt.subplot(2, 1, 1)
+        dendrogram(Z, truncate_mode="lastp", p=20, leaf_rotation=90., leaf_font_size=10.)
+        plt.title(f"Dendrogram ({linkage_method} linkage)")
+        plt.xlabel("Sample index")
+        plt.ylabel("Distance")
+        
+        # Plot distance differences
+        plt.subplot(2, 1, 2)
+        distance_diffs = np.diff(Z[:, 2])
+        plt.plot(range(len(distance_diffs)), distance_diffs, 'b-')
+        if n_clusters is None:
+            plt.axvline(x=max_diff_idx, color='r', linestyle='--', 
+                       label=f'Maximum difference at {max_diff_idx}')
+        plt.title("Distance Differences Between Merges")
+        plt.xlabel("Merge Step")
+        plt.ylabel("Distance Difference")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        
+        # Visualize clusters in 2D space
+        plt.figure(figsize=(12, 8))
+        if features.count() > 10000:
+            alpha = 0.06
+        else:
+            alpha = 0.6
+        scatter = plt.scatter(
+            pandas_df['x'], 
+            pandas_df['y'], 
+            c=pandas_df['cluster'], 
+            cmap='viridis', 
+            marker='o', 
+            alpha=alpha
+        )
+        plt.colorbar(scatter, label='Cluster')
+        plt.xlabel('First Principal Component')
+        plt.ylabel('Second Principal Component')
+        plt.title(f"Hierarchical Clustering Visualization\n({linkage_method} linkage, {n_clusters} clusters)")
+        plt.grid(True, alpha=0.3)
+        
+        # Add legend for clusters
+        unique_clusters = np.unique(cluster_labels)
+        legend_elements = [
+            plt.Line2D([0], [0], marker='o', color='w',
+                       markerfacecolor=scatter.cmap(scatter.norm(i)),
+                       label=f'Cluster {i}', markersize=10)
+            for i in unique_clusters
+        ]
+        plt.legend(handles=legend_elements)
+        plt.show()
+        
+        # Map cluster results back to the original Spark DataFrame
+        cluster_mapping = pandas_df[['row_idx', 'cluster']].apply(
+            lambda row: Row(row_idx=row['row_idx'], cluster=int(row['cluster'])),
+            axis=1
+        )
+        cluster_mapping_df = spark.createDataFrame(cluster_mapping.tolist())
+        
+        # Join cluster labels back to the original DataFrame
+        updated_features = raw_features.join(cluster_mapping_df, on='row_idx', how='left')
+        
+        return updated_features, n_clusters
+        
+    except Exception as e:
+        return None, None
+        #print(f"Error in hierarchical clustering or visualization: {str(e)}")
+        #raise e  # Re-raise the exception to see the full error trace
+        
+    finally:
+        # Clean up
+        features.unpersist()
+
+
+
+# %% year or artist
+def cluster_by_filter(features, filter_type='year', filter_value=2020, 
+                     linkage_method="ward", sample_size=0.99, n_clusters=None):
+    """
+    Perform hierarchical clustering on filtered data by year or artist
+    
+    Args:
+        features: Input features DataFrame
+        filter_type: 'year' or 'artist' to filter by
+        filter_value: Year (int) or artist name (str) to filter for
+        linkage_method: Linkage method for hierarchical clustering
+        sample_size: Fraction of data to sample
+        n_clusters: Number of clusters (optional)
+    """
+
+    # Standardize features at global level
+    
+
+    if filter_type == 'year':
+        filtered_df = features.filter(F.year(F.col("release_date")) == filter_value)
+    elif filter_type == 'artist':
+        filtered_df = features.filter(F.col("artist") == filter_value)
+    else:
+        raise ValueError("filter_type must be 'year' or 'artist'")
+        
+    
+    return visualize_hierarchical_clusters_with_results(
+        raw_features=features,
+        linkage_method=linkage_method,
+        sample_size=sample_size,
+        n_clusters=n_clusters
+    )
+
+# Example usage for year 2020
+for linkage_method in ["ward", "complete", "average", "single"]:
+    clustered_data, num_clusters = cluster_by_filter(
+        scaled_features,
+        linkage_method=linkage_method,
+        filter_type='year', 
+        filter_value=2017)
+
+
+
+# %%
