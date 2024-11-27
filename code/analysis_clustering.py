@@ -27,14 +27,39 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
-# 仅仅要release_date在1920-2020的
-df = df.filter((F.col("release_date").between("1960-01-01", "2020-12-31")))
-print(df.count())
-
 # Note potentially relevant features like danceability, energy, acousticness, etc.
-df.columns
+print(df.columns)
+print("Number of rows before filtering:", df.count())
 
-# %% column names
+feature_cols = [
+    #'explicit',
+    #'liveness',
+    'duration_ms',
+    'loudness',
+    'key',
+    'tempo', 
+    'time_signature',
+    'mode',
+    'acousticness', 
+    'instrumentalness',  
+    'speechiness',
+    'danceability', 
+    'energy',
+    'valence'
+    ]
+
+
+
+#%% remove null and constrain time horizon
+# Remove null values from original dataframe
+df = df.dropna()
+print("Number of rows after removing nulls:", df.count())
+# 仅仅要release_date在1921-2020的
+df = df.filter((F.col("release_date").between("1921-01-01", "2020-12-31")))
+print("Number of rows within 1921-2020:", df.count())
+
+
+
 '''
 ['id',
  'name',
@@ -58,22 +83,6 @@ df.columns
  '''
 # %% Data preprocessing
 # identify potentially relevant features and add to a feature dataframe
-feature_cols = [
-    #'explicit',
-    #'liveness',
-    'duration_ms',
-    'loudness',
-    'key',
-    'tempo', 
-    'time_signature',
-    'mode',
-    'acousticness', 
-    'instrumentalness',  
-    'speechiness',
-    'danceability', 
-    'energy',
-    'valence'
-    ]
 
 # select feature columns and numeric data as floats
 df_features = df.select(*(F.col(c).cast("float").alias(c) for c in feature_cols),'id','name', 'artist') \
@@ -199,9 +208,7 @@ def analyze_pca_composition(model_pca, feature_cols):
     
     return components_df
 
-
-# %% PCA-KMeans
-def find_optimal_pca_components(features,threshold=0.9,k=None):
+def find_optimal_pca_components(features,threshold=0.95,k=None):
     """
     Find optimal number of PCA components by analyzing explained variance
     
@@ -270,13 +277,137 @@ def find_optimal_pca_components(features,threshold=0.9,k=None):
     pca_features = spark.createDataFrame(pca_features.map(Row), ["features"])
 
     return optimal_n, pca_features, explained_variances, cumulative_variance, model
+
+# sample PCA points
+def plot_pca_sample(features_pca, sample_size=0.1, seed=None):
+    """
+    Plot sampled PCA points in 2D space
+    
+    Args:
+        features_pca: DataFrame with PCA features
+        sample_size: Fraction of data to sample (default 0.1)
+        seed: Random seed for sampling (optional)
+    """
+    # Sample data
+    if seed is None:
+        sampled_data = features_pca.sample(False, sample_size)
+    else:
+        sampled_data = features_pca.sample(False, sample_size, seed=seed)
+    
+    # Convert to pandas and extract coordinates
+    df = sampled_data.toPandas()
+    coords = np.vstack(df['features'].values)
+    
+    # Create scatter plot
+    plt.figure(figsize=(10, 8))
+    plt.scatter(coords[:, 0], coords[:, 1], alpha=0.5)
+    
+    plt.xlabel('First Principal Component')
+    plt.ylabel('Second Principal Component')
+    plt.title(f'PCA Distribution of Songs (Sample Size: {sample_size*100:.1f}%)')
+    plt.grid(True, alpha=0.3)
+    plt.ylim(-2.3, 1.3)
+    plt.xlim(-6.3, 4.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_yearly_distribution_animation(features_pca, df, sample_size=0.1, grid_size=100, seed=42):
+    """
+    Create an animated plot showing the evolution of song distribution in PCA space over time
+    
+    Args:
+        features_pca: DataFrame with PCA features
+        df: Original dataframe with metadata
+        sample_size: Fraction of data to sample
+        grid_size: Number of grid cells in each dimension
+        seed: Random seed for sampling
+    """
+    # Sample data
+    sampled_pca = features_pca.sample(False, sample_size, seed=seed)
+    sampled_df = df.sample(False, sample_size, seed=seed)
+    
+    # Convert to pandas
+    pca_df = sampled_pca.toPandas()
+    metadata_df = sampled_df.select('release_date').toPandas()
+    
+    # Extract PCA coordinates and years
+    pca_coords = np.vstack(pca_df['features'].values)
+    years = pd.to_datetime(metadata_df['release_date']).dt.year.values
+    
+    # Create grid for density estimation
+    x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
+    y_edges = np.linspace(pca_coords[:,1].min(), pca_coords[:,1].max(), grid_size)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Create colorbar axes
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    
+    def update(frame):
+        ax.clear()
+        year = sorted(np.unique(years))[frame]
+        year_mask = years == year
+        year_coords = pca_coords[year_mask]
+        
+        if len(year_coords) > 0:
+            # Calculate 2D histogram
+            hist, _, _ = np.histogram2d(
+                year_coords[:,0], 
+                year_coords[:,1],
+                bins=[x_edges, y_edges]
+            )
+            
+            # Plot heatmap
+            im = ax.imshow(
+                hist.T,
+                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                origin='lower',
+                cmap='viridis',
+                aspect='auto'
+            )
+            
+            ax.set_title(f'Year: {year}')
+            ax.set_xlabel('First Principal Component')
+            ax.set_ylabel('Second Principal Component')
+            
+            # Update colorbar
+            if frame == 0:
+                cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
+                cbar.ax.yaxis.label.set_color('white')
+                cbar.ax.tick_params(colors='white')
+    
+    # Create animation
+    unique_years = sorted(np.unique(years))
+    anim = animation.FuncAnimation(
+        fig, 
+        update,
+        frames=len(unique_years),
+        interval=100,  # 100ms between frames
+        repeat=True
+    )
+    
+    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
+    plt.tight_layout()
+    
+    # Save animation
+    anim.save('music_distribution_evolution.gif', writer='pillow')
+    plt.show()
+
+#%% run PCA+sample+KMeans
+
 # 1. PCA: find optimal number of components
-optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features,k=2)
-components_df = analyze_pca_composition(model_pca, feature_cols)
-#%% KMeans
-# 2. KMeans: find optimal k, based on PCA-transformed features
+optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features)
 features_pca.persist()
-optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 5))
+# PCA composition
+components_df = analyze_pca_composition(model_pca, feature_cols)
+# PCA sample
+plot_pca_sample(features_pca, sample_size=0.1)
+# PCA yearly distribution animation
+plot_yearly_distribution_animation(features_pca, df, sample_size=0.1)
+# 2. KMeans: find optimal k, based on PCA-transformed features
+optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 8))
 
 
 #%% merge cluster results
