@@ -25,11 +25,11 @@ spark = SparkSession \
         .getOrCreate()
 
 # Read Spotify data
-df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
+df_raw = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
 # Note potentially relevant features like danceability, energy, acousticness, etc.
-print(df.columns)
-print("Number of rows before filtering:", df.count())
+print(df_raw.columns)
+print("Number of rows before filtering:", df_raw.count())
 
 feature_cols = [
     #'explicit',
@@ -43,23 +43,31 @@ feature_cols = [
     'acousticness', 
     'instrumentalness',  
     'speechiness',
-    'danceability', 
-    'energy',
-    'valence'
+    #'danceability', 
+    #'energy',
+    #'valence'
     ]
 
 
 
 #%% remove null and constrain time horizon
 # Remove null values from original dataframe
-#df = df.dropna()
-print("Number of rows after removing nulls:", df.count())
+df_raw = df_raw.dropna()
+print("Number of rows after removing nulls:", df_raw.count())
 # 仅仅要release_date在1921-2020的
 #df = df.filter((F.col("release_date").between("1921-01-01", "2020-12-31")))
-print("Number of rows within 1921-2020:", df.count())
+#print("Number of rows within 1921-2020:", df.count())
+# 排除在remove_id中的行
+'''
+# Read remove_id list in a distributed way
+remove_id_df = spark.read.csv('/home/mikezhu/remove_id.csv', header=True)
+# 假设 remove_list 是要剔除的列表
+remove_list = remove_id_df.select('id').rdd.flatMap(lambda x: x).collect()
+remove_ids = spark.sparkContext.broadcast(set(remove_list))  # 广播变量
 
-
-
+# 过滤 df 中的行
+df = df.filter(~F.col("id").isin(remove_ids.value))  # 剔除匹配 id 的行
+'''
 '''
 ['id',
  'name',
@@ -85,7 +93,7 @@ print("Number of rows within 1921-2020:", df.count())
 # identify potentially relevant features and add to a feature dataframe
 
 # select feature columns and numeric data as floats
-df_features = df.select(*(F.col(c).cast("float").alias(c) for c in feature_cols),'id','name', 'artist') \
+df_features = df_raw.select(*(F.col(c).cast("float").alias(c) for c in feature_cols),'id','name', 'artist') \
                          .dropna()
 df_features = df_features.withColumn('features', F.array(*[F.col(c) for c in feature_cols])) \
                          .select('id','name', 'artist', 'features')
@@ -107,7 +115,7 @@ features.printSchema()
 
 # %% K-means and PCA visualization functions
 # try different numbers of clusters to find optimal k
-def find_optimal_kmeans(features, k_values=range(3, 5)):
+def find_optimal_kmeans(features, k_values=range(3, 5), seed=42):
     """
     Find optimal k for KMeans clustering using silhouette scores
     
@@ -124,7 +132,7 @@ def find_optimal_kmeans(features, k_values=range(3, 5)):
     
     for k in k_values:
         # train model
-        kmeans = KMeans(k=k, seed=1)
+        kmeans = KMeans(k=k, seed=seed)
         model = kmeans.fit(features)
         
         # make predictions
@@ -165,6 +173,92 @@ def find_optimal_kmeans(features, k_values=range(3, 5)):
     optimal_predictions = kmeans_model.transform(features)
     
     return optimal_k, optimal_predictions, silhouettes
+
+
+def find_optimal_kmeans_multiple_seeds(features, k_values=range(3, 5), n_seeds=5):
+    """
+    Find optimal k for KMeans clustering using multiple random seeds
+    
+    Args:
+        features: DataFrame with feature vectors
+        k_values: Range of k values to try
+        n_seeds: Number of random seeds to try
+        
+    Returns:
+        optimal_k: Optimal number of clusters
+        kmeans_predictions: Predictions using optimal k and best seed
+        silhouettes_list: List of silhouette scores for each seed
+        seeds: List of seeds used
+    """
+    # Generate random seeds
+    seeds = np.random.randint(0, 1000, size=n_seeds)
+    print(f"Using random seeds: {seeds}")
+    
+    # Store silhouette scores for each seed
+    silhouettes_list = []
+    predictions_list = []
+    
+    # Try different seeds
+    for seed in seeds:
+        silhouettes = []
+        
+        for k in k_values:
+            # train model
+            kmeans = KMeans(k=k, seed=seed)
+            model = kmeans.fit(features)
+            
+            # make predictions
+            predictions = model.transform(features)
+            
+            # evaluate clustering
+            evaluator = ClusteringEvaluator()
+            silhouette = evaluator.evaluate(predictions)
+            silhouettes.append(silhouette)
+            print(f"Seed {seed}, k={k}: Silhouette score = {silhouette}")
+        
+        silhouettes_list.append(silhouettes)
+        
+        # Plot silhouette scores for this seed
+        plt.figure(figsize=(10, 6))
+        plt.plot(k_values, silhouettes, 'bo-')
+        plt.xlabel('Number of Clusters (k)')
+        plt.ylabel('Silhouette Score')
+        plt.title(f'Silhouette Score vs Number of Clusters (Seed {seed})')
+        plt.grid(True)
+        
+        # Add value labels
+        for k, silhouette in zip(k_values, silhouettes):
+            plt.annotate(f'{silhouette:.3f}', 
+                        (k, silhouette), 
+                        textcoords="offset points", 
+                        xytext=(0,10),
+                        ha='center')
+        
+        plt.show()
+        
+        # Store predictions for optimal k for this seed
+        optimal_k_seed = k_values[silhouettes.index(max(silhouettes))]
+        kmeans = KMeans(k=optimal_k_seed, seed=seed)
+        kmeans_model = kmeans.fit(features)
+        predictions_list.append(kmeans_model.transform(features))
+
+    # Convert to numpy array for easier analysis
+    silhouettes_array = np.array(silhouettes_list)
+    
+    # Find most stable k value (lowest variance across seeds)
+    variances = np.var(silhouettes_array, axis=0)
+    most_stable_k_idx = np.argmin(variances)
+    optimal_k = k_values[most_stable_k_idx]
+    
+    # Find best seed for optimal k
+    best_seed_idx = np.argmax(silhouettes_array[:, most_stable_k_idx])
+    best_seed = seeds[best_seed_idx]
+    
+    print(f"\nMost stable number of clusters (k) = {optimal_k}")
+    print(f"Best seed = {best_seed}")
+    print(f"Best silhouette score = {silhouettes_array[best_seed_idx, most_stable_k_idx]}")
+    
+    return optimal_k, predictions_list[best_seed_idx], silhouettes_list, seeds
 
 def analyze_pca_composition(model_pca, feature_cols):
     """
@@ -208,7 +302,7 @@ def analyze_pca_composition(model_pca, feature_cols):
     
     return components_df
 
-def find_optimal_pca_components(features,threshold=0.9,k=None):
+def find_optimal_pca_components(features,threshold=0.95,k=None):
     """
     Find optimal number of PCA components by analyzing explained variance
     
@@ -277,14 +371,8 @@ def find_optimal_pca_components(features,threshold=0.9,k=None):
     pca_features = spark.createDataFrame(pca_features.map(Row), ["features"])
 
     return optimal_n, pca_features, explained_variances, cumulative_variance, model
-# 1. PCA: find optimal number of components
-optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features,k=2)
-components_df = analyze_pca_composition(model_pca, feature_cols)
 
-# 2. KMeans: find optimal k, based on PCA-transformed features
-features_pca.persist()
-optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 5))
-# %% sample PCA points
+# sample PCA points
 def plot_pca_sample(features_pca, sample_size=0.1, seed=None):
     """
     Plot sampled PCA points in 2D space
@@ -318,137 +406,28 @@ def plot_pca_sample(features_pca, sample_size=0.1, seed=None):
     plt.show()
 
 
-
-#%% merge cluster results
-merged_results = kmeans_predictions_pca.withColumn("tmp_id", F.monotonically_increasing_id()) \
-            .join(df_features.withColumn("tmp_id", F.monotonically_increasing_id()).withColumnRenamed("features", "raw_features"), on="tmp_id", how="inner").drop("tmp_id") \
-            .join(df,on=["id","name","artist"],how="inner")
-merged_results.show()
-merged_results.count()
-
-# Get cluster counts
-cluster_counts = merged_results.groupby('prediction').count()
-cluster_counts.show()
-
-
-# %% 检查较小类别发现奇怪的类别，所以剔除
-#算是剔除极端值 但是之前feature太多 无法判断 所以这样是合适的
-# Visualize clusters in PCA space with sampled data
-def plot_pca_clusters(merged_results, sample_size=0.1, seed=42):
-    """
-    Plot sampled data points in PCA space, colored by cluster
-    
-    Args:
-        merged_results: DataFrame containing PCA features and cluster predictions
-        sample_size: Fraction of data to sample (default 0.1)
-        seed: Random seed for reproducibility
-    """
-    # Sample data
-    sampled_data = merged_results.sample(withReplacement=False, fraction=sample_size, seed=seed)
-    
-    # Convert to pandas for plotting
-    df = sampled_data.select('features', 'prediction').toPandas()
-    
-    # Extract PCA coordinates
-    pca_coords = np.vstack(df['features'].values)
-    
-    # Get number of unique clusters
-    n_clusters = len(df['prediction'].unique())
-    
-    # Create color map
-    colors = plt.cm.tab10(np.linspace(0, 1, n_clusters))
-    
-    # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
-    # Plot each cluster
-    for cluster_id in range(n_clusters):
-        mask = df['prediction'] == cluster_id
-        plt.scatter(pca_coords[mask, 0], pca_coords[mask, 1],
-                   c=[colors[cluster_id]], 
-                   label=f'Cluster {cluster_id}',
-                   alpha=0.6)
-    
-    plt.xlabel('First Principal Component')
-    plt.ylabel('Second Principal Component') 
-    plt.title('Song Clusters in PCA Space')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-# Plot clusters with 10% of data
-plot_pca_clusters(merged_results, sample_size=0.1)
-
-small_clusters = cluster_counts.filter(F.col("count") < 10000).select("prediction").rdd.flatMap(lambda x: x).collect()
-cluster_results = merged_results.filter(~F.col("prediction").isin(small_clusters))
-
-
-# %% 把分析无关的去掉：时间
-# 之前不剔除是合理的，因为辅助找空间(PCA) 即使有缺失和其他年限；多余的信息帮助我们确定dimension
-# filter out songs before 1921 and after 2020
-cluster_results = cluster_results.filter(F.year(F.to_timestamp('release_date')).between(1921, 2020))
-
-# old cluster distribution
-cluster_results.groupby('prediction') \
-              .count() \
-              .orderBy('prediction') \
-              .show()
-plot_pca_clusters(cluster_results, sample_size=0.1)
-
-# %% 调整PCA的方向
-# 刷新df
-# Use the ids from cluster_results to filter the original dataframe df
-cluster_results.show()
-# Select features and convert to dense vector format
-df_features = df.select(*(F.col(c).cast("float").alias(c) for c in feature_cols)) \
-                .dropna()
-df_features = df_features.withColumn('features', F.array(*[F.col(c) for c in feature_cols])) \
-                .select('features')
-
-# Convert to dense vectors
-vectors = df_features.rdd.map(lambda row: Vectors.dense(row.features))
-features = spark.createDataFrame(vectors.map(Row), ["features"])
-
-# Standardize features
-standardizer = StandardScaler(inputCol="features", outputCol="scaled_features")
-scaler = standardizer.fit(features)
-scaled_features = scaler.transform(features)
-
-# Run PCA
-pca = PCA(k=2, inputCol="scaled_features", outputCol="pca_features")
-pca_model = pca.fit(scaled_features)
-df_pca = pca_model.transform(scaled_features)
-
-print("Number of rows after PCA:", df_pca.count())
-
-
-
-
-
-
-
-
-
-#rerun the PCA: above all
-
-# %% animation based on centroid evolution of PCA space
-def plot_yearly_distribution_animation(cluster_data, sample_size=0.1, grid_size=100, seed=42):
+def plot_yearly_distribution_animation(features_pca, df, sample_size=0.1, grid_size=100, seed=42):
     """
     Create an animated plot showing the evolution of song distribution in PCA space over time
     
     Args:
-        cluster_data: Spark DataFrame containing PCA features and metadata
+        features_pca: DataFrame with PCA features
+        df: Original dataframe with metadata
         sample_size: Fraction of data to sample
         grid_size: Number of grid cells in each dimension
         seed: Random seed for sampling
     """
-    # Sample and convert to pandas
-    _, _, df = exact_to_pd(cluster_data, sample_size=sample_size, seed=seed)
+    # Sample data
+    sampled_pca = features_pca.sample(False, sample_size, seed=seed)
+    sampled_df = df.sample(False, sample_size, seed=seed)
+    
+    # Convert to pandas
+    pca_df = sampled_pca.toPandas()
+    metadata_df = sampled_df.select('release_date').toPandas()
     
     # Extract PCA coordinates and years
-    pca_coords = np.vstack(df['features'].values)
-    years = pd.to_datetime(df['release_date']).dt.year.values
+    pca_coords = np.vstack(pca_df['features'].values)
+    years = pd.to_datetime(metadata_df['release_date']).dt.year.values
     
     # Create grid for density estimation
     x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
@@ -510,11 +489,143 @@ def plot_yearly_distribution_animation(cluster_data, sample_size=0.1, grid_size=
     anim.save('music_distribution_evolution.gif', writer='pillow')
     plt.show()
 
-# Example usage
-plot_yearly_distribution_animation(cluster_results, sample_size=0.1)
+#%% run PCA+sample+KMeans
 
+# 1. PCA: find optimal number of components
+optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features)
+features_pca.persist()
+# PCA composition
+components_df = analyze_pca_composition(model_pca, feature_cols)
+# PCA sample
+plot_pca_sample(features_pca, sample_size=0.1)
+# PCA yearly distribution animation
+#plot_yearly_distribution_animation(features_pca, df, sample_size=0.1)
+#%% Add PCA features and original features back to original dataframe
+# Convert PCA features to list of arrays for easier handling
+pca_features_list = features_pca.select('features').rdd.map(lambda row: row.features.toArray()).collect()
 
-#%% visualization functions
+# Create a new column with PCA features
+df_pca = df_raw.withColumn('row_id', F.monotonically_increasing_id())
+features_df = spark.createDataFrame(
+    [(i, Vectors.dense(pca_feat)) 
+     for i, pca_feat in enumerate(pca_features_list)],
+    ['row_id', 'pca_features']
+)
+
+# Join features back to original dataframe
+df_pca = df_pca.join(features_df, 'row_id').drop('row_id')
+
+# Show sample of results
+print("\nSample of dataframe with PCA features:")
+df_pca.show(5, truncate=False)
+
+#%% Add original features back to original dataframe
+features.persist()
+original_features_list = features.select('features').rdd.map(lambda row: row.features.toArray()).collect()
+
+# Create a new column with original features
+df_pca = df_pca.withColumn('row_id', F.monotonically_increasing_id())
+features_df = spark.createDataFrame(
+    [(i, Vectors.dense(orig_feat)) 
+     for i, orig_feat in enumerate(original_features_list)],
+    ['row_id', 'original_features']
+)
+
+# Join features back to original dataframe
+df_pca = df_pca.join(features_df, 'row_id').drop('row_id')
+
+# Show sample of results
+print("\nSample of dataframe with original features:")
+df_pca.show(5, truncate=False)
+
+#%% hierarchical clustering, to identify clusters
+def hierarchical_clustering_analysis(cluster_data, n_clusters=5):
+    """
+    Perform hierarchical clustering analysis on sampled PCA data and visualize results
+    
+    Args:
+        cluster_data: Spark DataFrame containing PCA features
+        n_clusters: Number of clusters to create
+    Returns:
+        Z: Linkage matrix
+        clusters: Cluster assignments
+        sampled_pca: PCA coordinates used for clustering
+    """
+    # Convert PCA features to numpy array
+    pca_data = cluster_data.select('pca_features').toPandas().pca_features.tolist()
+    pca_coords = np.array([np.array(x.toArray()) for x in pca_data])
+
+    # Perform hierarchical clustering
+    from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+    from scipy.spatial.distance import pdist
+
+    # Calculate distance matrix and linkage
+    print("Calculating linkage...")
+    Z = linkage(pca_coords, method='ward')
+
+    # Plot dendrogram
+    plt.figure(figsize=(15, 8))
+    dendrogram(Z, truncate_mode='lastp', p=50)  # Only show last 50 levels
+    plt.title('Hierarchical Clustering Dendrogram')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Distance')
+    plt.show()
+
+    # Cut tree to get clusters
+    clusters = fcluster(Z, n_clusters, criterion='maxclust')
+    # Convert clusters from 1-based to 0-based indexing
+    clusters = clusters - 1
+
+    # Plot clusters in PCA space
+    dims = [(0,1), (1,2), (0,2)]  # Combinations of first 3 PCs
+    colors = plt.cm.tab10(np.linspace(0, 1, n_clusters))
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle('Hierarchical Clustering Results in PCA Space', fontsize=16)
+
+    for ax, (dim1, dim2) in zip(axes, dims):
+        # Plot each cluster
+        for cluster in range(n_clusters):  # Now using 0-based indexing
+            mask = clusters == cluster
+            ax.scatter(pca_coords[mask, dim1], 
+                      pca_coords[mask, dim2],
+                      c=[colors[cluster]], 
+                      label=f'Cluster {cluster}',
+                      alpha=0.6,
+                      s=20)
+        
+        ax.set_xlabel(f'PC{dim1+1}')
+        ax.set_ylabel(f'PC{dim2+1}')
+        ax.grid(True, alpha=0.3)
+        
+        # Add legend only to the first subplot
+        if dim1 == 0 and dim2 == 1:
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.show()
+    
+    # Add cluster predictions to original dataframe
+    cluster_predictions = spark.createDataFrame(
+        [(i, int(cluster)) for i, cluster in enumerate(clusters)],  # No need to subtract 1 anymore
+        ['row_id', 'prediction']
+    )
+    result_df = cluster_data.withColumn('row_id', F.monotonically_increasing_id()) \
+                           .join(cluster_predictions, 'row_id') \
+                           .drop('row_id')
+    return Z, clusters, pca_coords, result_df
+
+# Sample data for hierarchical clustering
+sample_size = 0.05
+seed = 42
+sampled_data = df_pca.sample(False, sample_size, seed=seed)
+
+# Run hierarchical clustering analysis
+Z, clusters, pca_coords, df_hc = hierarchical_clustering_analysis(sampled_data, n_clusters=7)
+
+df_hc.show(5, truncate=False)
+
+# %% visualization functions
 
 def exact_to_pd(cluster_full_data,artist_name=None,sample_size=0.1,seed=None):
     '''extract a subset of data, for visualization'''
@@ -621,7 +732,7 @@ def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None)
     num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name,sample_size,seed)
     
     # Get feature values from the features column
-    feature_values = pd.DataFrame(cluster_data['raw_features'].tolist(), 
+    feature_values = pd.DataFrame(cluster_data['original_features'].tolist(), 
                                 columns=feature_cols)
     
     # Calculate global means and standard deviations for standardization
@@ -671,4 +782,22 @@ def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None)
     plt.show()
     
     return cluster_means
+
+
+
+#%% Show top 10 songs from each cluster
+for cluster_id in range(df_hc.select('prediction').distinct().count()):
+    print(f"\nTop 10 songs in Cluster {cluster_id}:")
+    df_hc.filter(F.col('prediction') == cluster_id) \
+                  .select('name', 'artist', 'release_date') \
+                  .show(10, truncate=False)
+
+
+#%% visualization
+#global
+plot_cluster_distribution(df_hc)
+plot_cluster_evolution(df_hc)
+plot_cluster_radar(df_hc)
+
+
 # %%

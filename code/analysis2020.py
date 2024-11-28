@@ -27,39 +27,14 @@ spark = SparkSession \
 # Read Spotify data
 df = spark.read.csv('/home/mikezhu/music/data/spotify_dataset.csv', header=True)
 
-# Note potentially relevant features like danceability, energy, acousticness, etc.
-print(df.columns)
-print("Number of rows before filtering:", df.count())
-
-feature_cols = [
-    #'explicit',
-    #'liveness',
-    'duration_ms',
-    'loudness',
-    'key',
-    'tempo', 
-    'time_signature',
-    'mode',
-    'acousticness', 
-    'instrumentalness',  
-    'speechiness',
-    'danceability', 
-    'energy',
-    'valence'
-    ]
-
-
-
-#%% remove null and constrain time horizon
-# Remove null values from original dataframe
-df = df.dropna()
-print("Number of rows after removing nulls:", df.count())
 # 仅仅要release_date在1921-2020的
 df = df.filter((F.col("release_date").between("1921-01-01", "2020-12-31")))
-print("Number of rows within 1921-2020:", df.count())
+print(df.count())
 
+# Note potentially relevant features like danceability, energy, acousticness, etc.
+df.columns
 
-
+# %% column names
 '''
 ['id',
  'name',
@@ -83,6 +58,22 @@ print("Number of rows within 1921-2020:", df.count())
  '''
 # %% Data preprocessing
 # identify potentially relevant features and add to a feature dataframe
+feature_cols = [
+    #'explicit',
+    #'liveness',
+    'duration_ms',
+    'loudness',
+    'key',
+    'tempo', 
+    'time_signature',
+    'mode',
+    'acousticness', 
+    'instrumentalness',  
+    'speechiness',
+    'danceability', 
+    'energy',
+    'valence'
+    ]
 
 # select feature columns and numeric data as floats
 df_features = df.select(*(F.col(c).cast("float").alias(c) for c in feature_cols),'id','name', 'artist') \
@@ -208,7 +199,9 @@ def analyze_pca_composition(model_pca, feature_cols):
     
     return components_df
 
-def find_optimal_pca_components(features,threshold=0.95,k=None):
+
+# %% PCA-KMeans
+def find_optimal_pca_components(features,threshold=0.9,k=None):
     """
     Find optimal number of PCA components by analyzing explained variance
     
@@ -278,136 +271,14 @@ def find_optimal_pca_components(features,threshold=0.95,k=None):
 
     return optimal_n, pca_features, explained_variances, cumulative_variance, model
 
-# sample PCA points
-def plot_pca_sample(features_pca, sample_size=0.1, seed=None):
-    """
-    Plot sampled PCA points in 2D space
-    
-    Args:
-        features_pca: DataFrame with PCA features
-        sample_size: Fraction of data to sample (default 0.1)
-        seed: Random seed for sampling (optional)
-    """
-    # Sample data
-    if seed is None:
-        sampled_data = features_pca.sample(False, sample_size)
-    else:
-        sampled_data = features_pca.sample(False, sample_size, seed=seed)
-    
-    # Convert to pandas and extract coordinates
-    df = sampled_data.toPandas()
-    coords = np.vstack(df['features'].values)
-    
-    # Create scatter plot
-    plt.figure(figsize=(10, 8))
-    plt.scatter(coords[:, 0], coords[:, 1], alpha=0.5)
-    
-    plt.xlabel('First Principal Component')
-    plt.ylabel('Second Principal Component')
-    plt.title(f'PCA Distribution of Songs (Sample Size: {sample_size*100:.1f}%)')
-    plt.grid(True, alpha=0.3)
-    plt.ylim(-2.3, 1.3)
-    plt.xlim(-6.3, 4.3)
-    plt.tight_layout()
-    plt.show()
 
-
-def plot_yearly_distribution_animation(features_pca, df, sample_size=0.1, grid_size=100, seed=42):
-    """
-    Create an animated plot showing the evolution of song distribution in PCA space over time
-    
-    Args:
-        features_pca: DataFrame with PCA features
-        df: Original dataframe with metadata
-        sample_size: Fraction of data to sample
-        grid_size: Number of grid cells in each dimension
-        seed: Random seed for sampling
-    """
-    # Sample data
-    sampled_pca = features_pca.sample(False, sample_size, seed=seed)
-    sampled_df = df.sample(False, sample_size, seed=seed)
-    
-    # Convert to pandas
-    pca_df = sampled_pca.toPandas()
-    metadata_df = sampled_df.select('release_date').toPandas()
-    
-    # Extract PCA coordinates and years
-    pca_coords = np.vstack(pca_df['features'].values)
-    years = pd.to_datetime(metadata_df['release_date']).dt.year.values
-    
-    # Create grid for density estimation
-    x_edges = np.linspace(pca_coords[:,0].min(), pca_coords[:,0].max(), grid_size)
-    y_edges = np.linspace(pca_coords[:,1].min(), pca_coords[:,1].max(), grid_size)
-    
-    # Create figure
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    # Create colorbar axes
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    
-    def update(frame):
-        ax.clear()
-        year = sorted(np.unique(years))[frame]
-        year_mask = years == year
-        year_coords = pca_coords[year_mask]
-        
-        if len(year_coords) > 0:
-            # Calculate 2D histogram
-            hist, _, _ = np.histogram2d(
-                year_coords[:,0], 
-                year_coords[:,1],
-                bins=[x_edges, y_edges]
-            )
-            
-            # Plot heatmap
-            im = ax.imshow(
-                hist.T,
-                extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
-                origin='lower',
-                cmap='viridis',
-                aspect='auto'
-            )
-            
-            ax.set_title(f'Year: {year}')
-            ax.set_xlabel('First Principal Component')
-            ax.set_ylabel('Second Principal Component')
-            
-            # Update colorbar
-            if frame == 0:
-                cbar = fig.colorbar(im, cax=cbar_ax, label='Number of Songs')
-                cbar.ax.yaxis.label.set_color('white')
-                cbar.ax.tick_params(colors='white')
-    
-    # Create animation
-    unique_years = sorted(np.unique(years))
-    anim = animation.FuncAnimation(
-        fig, 
-        update,
-        frames=len(unique_years),
-        interval=100,  # 100ms between frames
-        repeat=True
-    )
-    
-    plt.suptitle('Evolution of Music Distribution in PCA Space', y=1.02, fontsize=16)
-    plt.tight_layout()
-    
-    # Save animation
-    anim.save('music_distribution_evolution.gif', writer='pillow')
-    plt.show()
-
-#%% run PCA+sample+KMeans
-
+#%% run 
 # 1. PCA: find optimal number of components
 optimal_n, features_pca, explained_variances, cumulative_variance, model_pca = find_optimal_pca_components(features)
-features_pca.persist()
-# PCA composition
 components_df = analyze_pca_composition(model_pca, feature_cols)
-# PCA sample
-plot_pca_sample(features_pca, sample_size=0.1)
-# PCA yearly distribution animation
-plot_yearly_distribution_animation(features_pca, df, sample_size=0.1)
 # 2. KMeans: find optimal k, based on PCA-transformed features
-optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 8))
+features_pca.persist()
+optimal_k_pca, kmeans_predictions_pca, silhouettes_pca = find_optimal_kmeans(features_pca,k_values=range(2, 5))
 
 
 #%% merge cluster results
@@ -423,7 +294,7 @@ cluster_counts = merged_results.groupby('prediction').count()
 cluster_counts.show()
 
 # Filter out clusters with less than 100000 songs
-small_clusters = cluster_counts.filter(F.col("count") < 10000).select("prediction").rdd.flatMap(lambda x: x).collect()
+small_clusters = cluster_counts.filter(F.col("count") < 100).select("prediction").rdd.flatMap(lambda x: x).collect()
 cluster_results = merged_results.filter(~F.col("prediction").isin(small_clusters))
 
 # filter out songs before 1920 and after 2020
@@ -434,28 +305,7 @@ cluster_results.groupby('prediction') \
               .count() \
               .orderBy('prediction') \
               .show()
-'''
 
-from pyspark.sql import Window
-from pyspark.sql import functions as F
-
-# get distinct cluster IDs and sort
-distinct_clusters = cluster_results.select("prediction").distinct().orderBy("prediction")
-
-# create new cluster IDs
-window_spec = Window.orderBy("prediction")
-renumbered_clusters = distinct_clusters.withColumn("new_prediction", F.row_number().over(window_spec) - 1)
-
-# map back to original data
-cluster_results = cluster_results.join(
-    renumbered_clusters, on="prediction", how="left"
-).drop("prediction").withColumnRenamed("new_prediction", "prediction")
-
-cluster_results.groupby('prediction') \
-              .count() \
-              .orderBy('prediction') \
-              .show()
-'''
 
 #%% visualization functions
 
@@ -614,64 +464,6 @@ def plot_cluster_radar(cluster_data, artist_name=None,sample_size=0.1,seed=None)
     plt.show()
     
     return cluster_means
-
-def plot_cluster_scatter(cluster_data, artist_name=None, sample_size=0.1, seed=None):
-    """Plot scatter plot of clusters in PCA space with different dimension combinations"""
-    num_clusters, colors, cluster_data = exact_to_pd(cluster_data, artist_name, sample_size, seed)
-    
-    # Extract PCA coordinates
-    pca_coords = np.vstack(cluster_data['features'].values)
-    
-    # Get dimensions to plot
-    dims = [(0,1), (0,2), (1,2)]  # Different combinations of first 3 PCs
-    
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle('Cluster Distribution in PCA Space', fontsize=16)
-    
-    for ax, (dim1, dim2) in zip(axes, dims):
-        # Plot each cluster
-        for cluster in range(num_clusters):
-            mask = cluster_data['prediction'] == cluster
-            ax.scatter(pca_coords[mask, dim1], 
-                      pca_coords[mask, dim2],
-                      c=[colors[cluster]], 
-                      label=f'Cluster {cluster}',
-                      alpha=0.6,
-                      s=20)
-        
-        ax.set_xlabel(f'PC{dim1+1}')
-        ax.set_ylabel(f'PC{dim2+1}')
-        ax.grid(True, alpha=0.3)
-        
-        # Add legend only to the first subplot
-        if dim1 == 0 and dim2 == 1:
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    if artist_name:
-        plt.suptitle(f'Cluster Distribution in PCA Space - {artist_name}', fontsize=16)
-    
-    plt.tight_layout()
-    plt.show()
-
-#%%
-plot_cluster_scatter(cluster_results)
-
-#%%
-# Show top 10 songs from each cluster
-for cluster_id in range(cluster_results.select('prediction').distinct().count()):
-    print(f"\nTop 10 songs in Cluster {cluster_id}:")
-    cluster_results.filter(F.col('prediction') == cluster_id) \
-                  .select('name', 'artist', 'release_date') \
-                  .show(10, truncate=False)
-
-
-# %%
-# 将cluster2的id储存
-story_id = [row.id for row in cluster_results.filter(F.col('prediction') == 2).select('id').collect()]
-#%%
-print(len(story_id))
-# 保存story_id为csv
-pd.DataFrame({'id': story_id, 'label': ['story'] * len(story_id)}).to_csv('remove_id.csv', index=False)
 
 #%% visualization
 
