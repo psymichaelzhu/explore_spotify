@@ -1897,7 +1897,7 @@ def analyze_artist_similarity_trends_pandas(cluster_data, sample_size=0.1, dista
                     artists = list(artist_centroids.keys())
                     for i in range(len(artists)):
                         for j in range(i + 1, len(artists)):
-                            dist = np.sqrt(((artist_centroids[artists[i]] - artist_centroids[artists[j]]) ** 2).sum()
+                            dist = np.sqrt(((artist_centroids[artists[i]] - artist_centroids[artists[j]]) ** 2).sum())
                             distances.append(dist)
                             
                     similarity_by_year['year'].append(year)
@@ -1927,7 +1927,7 @@ analyze_artist_similarity_trends_pandas(cluster_results, sample_size=0.1, distan
 analyze_artist_similarity_trends_pandas(cluster_results, sample_size=0.1, distance_type='between')
 
 
-# %%
+
 # %% evolution of music (yearly distribution)
 def plot_yearly_distribution(cluster_data, sample_size=0.1, grid_size=50, seed=42):
     """
@@ -2950,9 +2950,7 @@ extract_and_visualize_regressor_coefficients_with_ci_numeric(
 )
 
 
-# %%
-
-# Example usage
+# %% Example usage
 prophet_results, processed_data,yearly_distributions_pd = distributed_time_series_analysis(
     cluster_results, 
     sample_size=0.99,
